@@ -3,75 +3,491 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>v3.0 开发测试环境</title>
-    <!-- 引入 lamejs (生产环境会打包，开发阶段直接用 CDN) -->
+    <title>车机音频转换器 v3.0</title>
+    <!-- 生产环境依赖：lamejs (MP3编码), jszip (打包), file-saver (下载) -->
     <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
-        .test-zone { background: white; padding: 20px; border-radius: 8px; }
-        button { padding: 10px 20px; cursor: pointer; }
-        #log { margin-top: 10px; font-family: monospace; background: #333; color: #0f0; padding: 10px; height: 200px; overflow-y: auto;}
+        :root {
+            --primary-color: #007AFF;
+            --bg-color: #F5F5F7;
+            --card-bg: #FFFFFF;
+            --text-main: #1D1D1F;
+            --text-sub: #86868B;
+            --border-radius: 12px;
+            --success-color: #34C759;
+            --error-color: #FF3B30;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 480px;
+            background-color: var(--card-bg);
+            border-radius: 20px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin: 0 0 8px 0;
+            color: var(--text-main);
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: var(--text-sub);
+            margin: 0;
+        }
+
+        /* 拖拽区域 */
+        .drop-zone {
+            border: 2px dashed #D1D1D6;
+            border-radius: var(--border-radius);
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background-color: #FAFAFA;
+            margin-bottom: 20px;
+        }
+
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: var(--primary-color);
+            background-color: rgba(0, 122, 255, 0.05);
+        }
+
+        .drop-zone-icon {
+            font-size: 32px;
+            margin-bottom: 10px;
+            display: block;
+        }
+
+        .drop-zone-text {
+            color: var(--text-sub);
+            font-size: 14px;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        /* 文件列表 */
+        .file-list {
+            flex-grow: 1;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            max-height: 400px;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            background-color: #F9F9F9;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .file-icon {
+            margin-right: 12px;
+            font-size: 18px;
+        }
+
+        .file-info {
+            flex-grow: 1;
+            overflow: hidden;
+        }
+
+        .file-name {
+            font-weight: 500;
+            color: var(--text-main);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: block;
+        }
+
+        .file-meta {
+            font-size: 12px;
+            color: var(--text-sub);
+            margin-top: 2px;
+        }
+
+        .file-status {
+            font-size: 12px;
+            font-weight: 600;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background-color: #eee;
+            color: var(--text-sub);
+        }
+
+        .file-status.converting {
+            background-color: rgba(0, 122, 255, 0.1);
+            color: var(--primary-color);
+        }
+
+        .file-status.done {
+            background-color: rgba(52, 199, 89, 0.1);
+            color: var(--success-color);
+        }
+
+        .file-status.error {
+            background-color: rgba(255, 59, 48, 0.1);
+            color: var(--error-color);
+        }
+
+        /* 底部按钮 */
+        .btn-download {
+            width: 100%;
+            padding: 16px;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .btn-download:disabled {
+            background-color: #D1D1D6;
+            cursor: not-allowed;
+        }
+
+        .btn-download:not(:disabled):hover {
+            background-color: #0066D6;
+        }
+
+        /* 隐藏的高级设置 */
+        .settings {
+            display: none; /* 默认隐藏，符合需求 */
+            margin-bottom: 20px;
+            font-size: 14px;
+            color: var(--text-sub);
+            text-align: center;
+        }
     </style>
 </head>
 <body>
 
-    <div class="test-zone">
-        <h1>v3.0 核心引擎测试</h1>
-        <p>选择 FLAC/WAV/MP3 文件进行测试：</p>
-        <input type="file" id="fileInput" accept=".flac,.wav,.mp3,.m4a">
-        <button id="convertBtn">转换并下载 MP3 (320kbps)</button>
-        <div id="log"></div>
+<div class="container">
+    <header>
+        <h1>车机音频转换器</h1>
+        <p class="subtitle">专为老款车机优化的离线转换工具</p>
+    </header>
+
+    <div class="drop-zone" id="dropZone">
+        <span class="drop-zone-icon">🎵</span>
+        <p class="drop-zone-text">拖拽音频文件至此<br>或点击选择</p>
+        <input type="file" id="fileInput" multiple accept=".flac,.wav,.mp3,.m4a,.ogg">
     </div>
 
-    <!-- 模块加载 (ES6 Modules) -->
-    <script type="module">
-        import Decoder from './src/decoder.js';
-        import Encoder from './src/encoder.js';
-        import { formatFileSize } from './src/util.js';
+    <div class="file-list" id="fileList">
+        <!-- 文件列表动态生成 -->
+    </div>
 
-        const log = (msg) => {
-            document.getElementById('log').innerHTML += `<div>> ${msg}</div>`;
-        };
+    <button class="btn-download" id="downloadBtn" disabled>
+        下载全部 (MP3 320kbps)
+    </button>
+</div>
 
-        const decoder = new Decoder();
-        const encoder = new Encoder();
+<script>
+/**
+ * v3.0 核心逻辑
+ * 结构：Utils -> Decoder -> Encoder -> App
+ */
 
-        document.getElementById('convertBtn').addEventListener('click', async () => {
-            const fileInput = document.getElementById('fileInput');
-            if (!fileInput.files[0]) return alert("请先选择文件");
+// --- 1. Utils 工具模块 ---
+const Utils = {
+    formatFileSize(bytes) {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    },
+    getFileName(filename) {
+        return filename.replace(/\.[^/.]+$/, "");
+    }
+};
 
-            const file = fileInput.files[0];
-            log(`开始处理: ${file.name} (${formatFileSize(file.size)})`);
+// --- 2. Decoder 解码模块 ---
+const Decoder = {
+    audioContext: null,
+
+    initContext() {
+        if (!this.audioContext) {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            // 强制目标采样率 44.1kHz，适配车机
+            this.audioContext = new AudioContext({ sampleRate: 44100 });
+        }
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume();
+        }
+        return this.audioContext;
+    },
+
+    async decode(arrayBuffer) {
+        const ctx = this.initContext();
+        try {
+            // 现代浏览器原生支持 FLAC/MP3/WAV/M4A
+            return await ctx.decodeAudioData(arrayBuffer);
+        } catch (e) {
+            console.error("解码失败:", e);
+            throw new Error("不支持的格式或文件损坏");
+        }
+    }
+};
+
+// --- 3. Encoder 编码模块 (MP3 320kbps) ---
+const Encoder = {
+    config: {
+        sampleRate: 44100,
+        bitRate: 320,
+        channels: 2
+    },
+
+    async encode(audioBuffer) {
+        if (typeof lamejs === 'undefined') {
+            throw new Error("编码库未加载");
+        }
+
+        const sampleRate = this.config.sampleRate;
+        const mp3encoder = new lamejs.Mp3Encoder(this.config.channels, sampleRate, this.config.bitRate);
+        const mp3Data = [];
+
+        // 提取左右声道数据
+        const left = audioBuffer.getChannelData(0);
+        const right = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : left;
+
+        // Float32 -> Int16 转换
+        const samples = left.length;
+        const leftInt = new Int16Array(samples);
+        const rightInt = new Int16Array(samples);
+
+        for (let i = 0; i < samples; i++) {
+            // 限幅处理
+            const sLeft = Math.max(-1, Math.min(1, left[i]));
+            const sRight = Math.max(-1, Math.min(1, right[i]));
+            leftInt[i] = sLeft < 0 ? sLeft * 0x8000 : sLeft * 0x7FFF;
+            rightInt[i] = sRight < 0 ? sRight * 0x8000 : sRight * 0x7FFF;
+        }
+
+        // 分块编码 (1152 是 MP3 帧大小)
+        const block = 1152;
+        for (let i = 0; i < samples; i += block) {
+            const leftChunk = leftInt.subarray(i, i + block);
+            const rightChunk = rightInt.subarray(i, i + block);
+            const mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
+            if (mp3buf.length > 0) mp3Data.push(mp3buf);
+        }
+        
+        const mp3buf = mp3encoder.flush();
+        if (mp3buf.length > 0) mp3Data.push(mp3buf);
+
+        return new Blob(mp3Data, { type: 'audio/mpeg' });
+    }
+};
+
+// --- 4. App 主应用 ---
+const App = {
+    files: [], // 存储文件对象 { id, file, status, blob }
+    isProcessing: false,
+
+    init() {
+        this.dropZone = document.getElementById('dropZone');
+        this.fileInput = document.getElementById('fileInput');
+        this.fileList = document.getElementById('fileList');
+        this.downloadBtn = document.getElementById('downloadBtn');
+
+        this.bindEvents();
+    },
+
+    bindEvents() {
+        // 点击上传
+        this.dropZone.addEventListener('click', () => this.fileInput.click());
+        this.fileInput.addEventListener('change', (e) => this.handleFiles(e.target.files));
+
+        // 拖拽上传
+        this.dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            this.dropZone.classList.add('dragover');
+        });
+        this.dropZone.addEventListener('dragleave', () => {
+            this.dropZone.classList.remove('dragover');
+        });
+        this.dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            this.dropZone.classList.remove('dragover');
+            this.handleFiles(e.dataTransfer.files);
+        });
+
+        // 下载按钮
+        this.downloadBtn.addEventListener('click', () => this.downloadAll());
+    },
+
+    handleFiles(filesList) {
+        if (this.isProcessing) return;
+        
+        // 过滤非音频文件 (简单判断后缀)
+        const allowedExt = ['flac', 'wav', 'mp3', 'm4a', 'ogg'];
+        const validFiles = Array.from(filesList).filter(f => {
+            const ext = f.name.split('.').pop().toLowerCase();
+            return allowedExt.includes(ext);
+        });
+
+        if (validFiles.length === 0) return;
+
+        // 加入队列
+        validFiles.forEach(file => {
+            const id = Date.now() + Math.random();
+            this.files.push({
+                id: id,
+                file: file,
+                status: '等待',
+                blob: null
+            });
+            this.renderFileItem(id, file, '等待');
+        });
+
+        this.updateUIState();
+        this.startProcessing();
+    },
+
+    renderFileItem(id, file, status) {
+        // 查找是否已存在，防止重复添加
+        let itemEl = document.querySelector(`[data-id="${id}"]`);
+        
+        if (!itemEl) {
+            itemEl = document.createElement('div');
+            itemEl.className = 'file-item';
+            itemEl.dataset.id = id;
+            itemEl.innerHTML = `
+                <div class="file-icon">🎵</div>
+                <div class="file-info">
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-meta">${Utils.formatFileSize(file.size)}</span>
+                </div>
+                <span class="file-status">${status}</span>
+            `;
+            this.fileList.appendChild(itemEl);
+        } else {
+            itemEl.querySelector('.file-status').textContent = status;
+            itemEl.querySelector('.file-status').className = `file-status ${status === '完成' ? 'done' : (status === '错误' ? 'error' : 'converting')}`;
+            
+            // 更新文件名为 MP3
+            if (status === '完成') {
+                itemEl.querySelector('.file-name').textContent = Utils.getFileName(file.name) + '.mp3';
+            }
+        }
+    },
+
+    async startProcessing() {
+        if (this.isProcessing) return;
+        this.isProcessing = true;
+        this.downloadBtn.textContent = "转换中...";
+        this.downloadBtn.disabled = true;
+
+        // 串行处理文件 (避免内存爆炸)
+        for (let i = 0; i < this.files.length; i++) {
+            const item = this.files[i];
+            if (item.status === '完成' || item.status === '错误') continue;
+
+            item.status = '转换中';
+            this.renderFileItem(item.id, item.file, '转换中');
 
             try {
                 // 1. 读取文件
-                const arrayBuffer = await file.arrayBuffer();
-                log('文件读取完成...');
+                const arrayBuffer = await item.file.arrayBuffer();
+                
+                // 2. 解码 (Auto -> PCM)
+                const audioBuffer = await Decoder.decode(arrayBuffer);
+                
+                // 3. 编码 (PCM -> MP3 320kbps)
+                const mp3Blob = await Encoder.encode(audioBuffer);
+                
+                item.blob = mp3Blob;
+                item.status = '完成';
+                this.renderFileItem(item.id, item.file, '完成');
 
-                // 2. 解码
-                log('正在解码...');
-                const startTime = performance.now();
-                const audioBuffer = await decoder.decode(arrayBuffer);
-                const duration = (performance.now() - startTime).toFixed(0);
-                log(`解码完成 (耗时 ${duration}ms), 采样率: ${audioBuffer.sampleRate}Hz`);
+            } catch (e) {
+                console.error(e);
+                item.status = '错误';
+                this.renderFileItem(item.id, item.file, '错误');
+            }
+        }
 
-                // 3. 编码为 MP3
-                log('正在编码 MP3 (320kbps)...');
-                const mp3Blob = await encoder.encode(audioBuffer);
-                log(`编码完成，大小: ${formatFileSize(mp3Blob.size)}`);
+        this.isProcessing = false;
+        this.updateUIState();
+    },
 
-                // 4. 下载
-                const url = URL.createObjectURL(mp3Blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = file.name.replace(/\.[^/.]+$/, "") + ".mp3";
-                a.click();
-                log('下载已触发！');
+    updateUIState() {
+        const completedCount = this.files.filter(f => f.status === '完成').length;
+        const totalCount = this.files.length;
+        
+        if (totalCount > 0 && completedCount === totalCount) {
+            this.downloadBtn.textContent = `下载全部 (${totalCount} 个文件)`;
+            this.downloadBtn.disabled = false;
+        } else if (totalCount > 0 && this.isProcessing) {
+            this.downloadBtn.textContent = `正在转换...`;
+            this.downloadBtn.disabled = true;
+        } else {
+            this.downloadBtn.textContent = "下载全部 (MP3 320kbps)";
+            this.downloadBtn.disabled = true;
+        }
+    },
 
-            } catch (err) {
-                log(`<span style="color:red">错误: ${err.message}</span>`);
+    async downloadAll() {
+        const zip = new JSZip();
+        let count = 0;
+
+        this.files.forEach(item => {
+            if (item.blob) {
+                const filename = Utils.getFileName(item.file.name) + '.mp3';
+                zip.file(filename, item.blob);
+                count++;
             }
         });
-    </script>
+
+        if (count === 0) return;
+
+        this.downloadBtn.textContent = "正在打包...";
+        this.downloadBtn.disabled = true;
+
+        const content = await zip.generateAsync({ type: 'blob' });
+        saveAs(content, "车机音乐_" + new Date().toLocaleDateString() + ".zip");
+
+        this.downloadBtn.textContent = `下载全部 (${count} 个文件)`;
+        this.downloadBtn.disabled = false;
+    }
+};
+
+// 启动应用
+document.addEventListener('DOMContentLoaded', () => App.init());
+
+</script>
 </body>
 </html>
