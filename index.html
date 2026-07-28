@@ -230,7 +230,7 @@
             <h1>Pro Audio Converter <span style="font-size: 0.5em; color: var(--text-sub); vertical-align: middle;">v2.0</span></h1>
             <p class="subtitle">基于 WebAssembly，专为老款车机优化的极速转换</p>
             <div id="core-status">正在初始化...</div>
-            <div id="core-warning">⚠️ 提示：如果加载停滞，请确保页面在 HTTP/HTTPS 环境下运行，且 ffmpeg 文件夹路径正确。</div>
+            <div id="core-warning">⚠️ 提示：如果加载停滞，请检查 ffmpeg 文件夹路径。</div>
         </header>
 
         <div class="upload-area" id="drop-zone">
@@ -256,15 +256,21 @@
         </div>
     </div>
 
-    <!-- 引入 FFmpeg 库 (此处仅加载轻量级的 JS 核心) -->
+    <!-- 引入 FFmpeg 库 -->
     <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
 
     <script>
+        // ------------------------------------------------------------
+        // 1. 全局变量修正 (修复 FFmpegWASM is not defined)
+        // ------------------------------------------------------------
+        // 注意：在 0.11.6 版本的 CDN 构建中，全局变量名是 FFmpeg
+        const { createFFmpeg, fetchFile } = window.FFmpeg;
+
         // 状态管理
         const state = {
             ffmpeg: null,
             ffmpegLoaded: false,
-            files: [], // 存储 { id, file, status, progress }
+            files: [],
             isConverting: false
         };
 
@@ -280,16 +286,13 @@
         };
 
         // ------------------------------------------------------------
-        // 1. 初始化 FFmpeg (核心修复部分)
+        // 2. 初始化 FFmpeg
         // ------------------------------------------------------------
         async function loadFFmpeg() {
             if (state.ffmpegLoaded) return;
 
             try {
-                const { createFFmpeg, fetchFile } = FFmpegWASM;
-                
-                // ⭐⭐⭐ 关键修复：显式指定本地文件路径 ⭐⭐⭐
-                // 这样即使网络不通，也能加载您上传的 ffmpeg 文件
+                // ⭐ 关键配置：指定本地路径
                 state.ffmpeg = createFFmpeg({
                     log: true,
                     corePath: './ffmpeg/ffmpeg-core.js',
@@ -305,10 +308,8 @@
                     }
                 });
 
-                // 开始加载
                 await state.ffmpeg.load();
                 
-                // 成功
                 state.ffmpegLoaded = true;
                 els.coreStatus.textContent = '✅ FFmpeg 核心就绪';
                 els.coreStatus.classList.add('ready');
@@ -318,28 +319,18 @@
             } catch (error) {
                 console.error("FFmpeg 加载失败:", error);
                 els.coreStatus.textContent = '❌ 核心加载失败';
-                els.coreWarning.textContent = '错误: ' + error.message + '。请检查是否使用 HTTPS/本地服务器，且 ffmpeg 文件夹完整。';
+                els.coreWarning.textContent = '错误: ' + error.message + '。请检查 ffmpeg 文件夹路径是否正确。';
                 els.coreWarning.style.display = 'block';
             }
         }
 
-        // 设置 10 秒超时提示
-        setTimeout(() => {
-            if (!state.ffmpegLoaded && els.coreStatus.innerText.includes('正在')) {
-                els.coreWarning.style.display = 'block';
-            }
-        }, 10000);
+        // 启动加载
+        window.addEventListener('DOMContentLoaded', loadFFmpeg);
 
         // ------------------------------------------------------------
-        // 2. 文件处理逻辑
+        // 3. 文件处理逻辑
         // ------------------------------------------------------------
-        
-        // 文件 ID 生成器
-        function generateId() {
-            return Math.random().toString(36).substr(2, 9);
-        }
-
-        // 格式化文件大小
+        function generateId() { return Math.random().toString(36).substr(2, 9); }
         function formatSize(bytes) {
             if (bytes === 0) return '0 B';
             const k = 1024;
@@ -348,29 +339,20 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
-        // 添加文件到列表
         function addFiles(fileList) {
             if (fileList.length === 0) return;
-
-            // 移除空状态提示
             const emptyState = els.fileList.querySelector('.empty-state');
             if (emptyState) emptyState.remove();
 
             Array.from(fileList).forEach(file => {
                 const id = generateId();
-                const fileObj = {
-                    id,
-                    file,
-                    status: 'ready', // ready, converting, done
-                    progress: 0
-                };
+                const fileObj = { id, file, status: 'ready', progress: 0 };
                 state.files.push(fileObj);
                 renderFileItem(fileObj);
             });
             checkConvertButton();
         }
 
-        // 渲染单个文件条目
         function renderFileItem(fileObj) {
             const li = document.createElement('li');
             li.className = 'file-item';
@@ -390,29 +372,22 @@
             els.fileList.appendChild(li);
         }
 
-        // 更新文件状态 UI
         function updateFileStatus(id, progress, text) {
             const bar = document.getElementById(`prog-bar-${id}`);
             const fill = document.getElementById(`prog-fill-${id}`);
             const txt = document.getElementById(`status-text-${id}`);
-
-            if (bar && fill) {
-                bar.style.display = 'block';
-                fill.style.width = `${progress}%`;
-            }
+            if (bar && fill) { bar.style.display = 'block'; fill.style.width = `${progress}%`; }
             if (txt) txt.textContent = text || '';
         }
 
         // ------------------------------------------------------------
-        // 3. 转换逻辑
+        // 4. 转换逻辑
         // ------------------------------------------------------------
         async function startConversion() {
             if (!state.ffmpegLoaded || state.isConverting) return;
-
             state.isConverting = true;
             updateUIState();
 
-            // 过滤出未转换的文件
             const queue = state.files.filter(f => f.status === 'ready');
 
             for (let i = 0; i < queue.length; i++) {
@@ -422,20 +397,16 @@
                 try {
                     updateFileStatus(item.id, 0, '准备...');
                     
-                    const { fetchFile } = FFmpegWASM;
                     const inputName = `input.${item.file.name.split('.').pop()}`;
                     const outputName = `output_${item.id}.mp3`;
 
-                    // 写入文件
+                    // 使用全局 fetchFile
                     state.ffmpeg.FS('writeFile', inputName, await fetchFile(item.file));
 
-                    // 执行转换 (这里使用高质量的 MP3 设置，适合车机)
+                    // 执行转换
                     await state.ffmpeg.run('-i', inputName, '-b:a', '320k', '-ar', '44100', outputName);
 
-                    // 读取结果
                     const data = state.ffmpeg.FS('readFile', outputName);
-
-                    // 创建下载链接
                     const url = URL.createObjectURL(new Blob([data.buffer], { type: 'audio/mpeg' }));
                     const anchor = document.createElement('a');
                     anchor.href = url;
@@ -445,7 +416,7 @@
                     anchor.click();
                     document.body.removeChild(anchor);
                     
-                    // 清理内存
+                    // 清理
                     state.ffmpeg.FS('unlink', inputName);
                     state.ffmpeg.FS('unlink', outputName);
 
@@ -461,7 +432,7 @@
             state.isConverting = false;
             state.currentConvertingId = null;
             updateUIState();
-            alert('所有任务已完成！');
+            alert('转换任务已完成！');
         }
 
         function updateUIState() {
@@ -486,21 +457,15 @@
         }
 
         // ------------------------------------------------------------
-        // 4. 事件监听
+        // 5. 事件监听
         // ------------------------------------------------------------
-        
-        // 点击上传
         els.dropZone.addEventListener('click', () => els.fileInput.click());
         els.fileInput.addEventListener('change', (e) => {
             addFiles(e.target.files);
-            els.fileInput.value = ''; // 重置 input 以允许再次选择同名文件
+            els.fileInput.value = '';
         });
 
-        // 拖拽上传
-        els.dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            els.dropZone.classList.add('dragover');
-        });
+        els.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); els.dropZone.classList.add('dragover'); });
         els.dropZone.addEventListener('dragleave', () => els.dropZone.classList.remove('dragover'));
         els.dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
@@ -508,7 +473,6 @@
             addFiles(e.dataTransfer.files);
         });
 
-        // 按钮事件
         els.clearBtn.addEventListener('click', () => {
             state.files = [];
             els.fileList.innerHTML = '<li class="empty-state">暂无文件，请先上传</li>';
@@ -516,9 +480,6 @@
         });
 
         els.convertBtn.addEventListener('click', startConversion);
-
-        // 启动 FFmpeg
-        window.addEventListener('DOMContentLoaded', loadFFmpeg);
 
     </script>
 </body>
