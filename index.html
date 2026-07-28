@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>车机音频转换器 v3.2</title>
+    <title>车机音频转换器 v3.3</title>
     <style>
+        /* 基础样式 */
         :root {
             --primary-color: #007AFF;
             --bg-color: #F5F5F7;
@@ -37,23 +38,9 @@
             flex-direction: column;
         }
 
-        header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-
-        h1 {
-            font-size: 24px;
-            font-weight: 600;
-            margin: 0 0 8px 0;
-            color: var(--text-main);
-        }
-
-        .subtitle {
-            font-size: 14px;
-            color: var(--text-sub);
-            margin: 0;
-        }
+        header { text-align: center; margin-bottom: 30px; }
+        h1 { font-size: 24px; font-weight: 600; margin: 0 0 8px 0; color: var(--text-main); }
+        .subtitle { font-size: 14px; color: var(--text-sub); margin: 0; }
 
         .drop-zone {
             border: 2px dashed #D1D1D6;
@@ -65,32 +52,48 @@
             background-color: #FAFAFA;
             margin-bottom: 20px;
         }
-
-        .drop-zone:hover, .drop-zone.dragover {
-            border-color: var(--primary-color);
-            background-color: rgba(0, 122, 255, 0.05);
-        }
-
+        .drop-zone:hover, .drop-zone.dragover { border-color: var(--primary-color); background-color: rgba(0, 122, 255, 0.05); }
         .drop-zone-icon { font-size: 32px; margin-bottom: 10px; display: block; }
         .drop-zone-text { color: var(--text-sub); font-size: 14px; }
-
         input[type="file"] { display: none; }
+
+        /* 文件列表区域 */
+        .list-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            font-size: 13px;
+            color: var(--text-sub);
+            height: 20px; /* 防止高度抖动 */
+        }
+        
+        .clear-btn {
+            cursor: pointer;
+            color: var(--primary-color);
+            font-weight: 500;
+            visibility: hidden; /* 默认隐藏 */
+        }
+        .clear-btn:hover { text-decoration: underline; }
 
         .file-list {
             flex-grow: 1;
             overflow-y: auto;
             margin-bottom: 15px;
             max-height: 400px;
+            border-top: 1px solid #eee; /* 分割线 */
+            padding-top: 10px;
         }
 
         .file-item {
             display: flex;
             align-items: center;
-            padding: 12px;
+            padding: 10px;
             background-color: #F9F9F9;
             border-radius: 8px;
             margin-bottom: 8px;
             font-size: 14px;
+            position: relative;
         }
 
         .file-icon { margin-right: 12px; font-size: 18px; }
@@ -112,27 +115,42 @@
             border-radius: 4px;
             background-color: #eee;
             color: var(--text-sub);
+            cursor: default;
         }
-
         .file-status.converting { background-color: rgba(0, 122, 255, 0.1); color: var(--primary-color); }
         .file-status.done { background-color: rgba(52, 199, 89, 0.1); color: var(--success-color); }
-        .file-status.error { background-color: rgba(255, 59, 48, 0.1); color: var(--error-color); }
+        .file-status.error { 
+            background-color: rgba(255, 59, 48, 0.1); 
+            color: var(--error-color); 
+            cursor: pointer; /* 错误时可点击查看详情 */
+        }
 
-        /* 高级设置样式 */
-        .settings-wrapper {
-            margin-bottom: 15px;
+        /* 删除按钮 */
+        .file-delete {
+            position: absolute;
+            right: -5px;
+            top: -5px;
+            width: 20px;
+            height: 20px;
+            background: #FF3B30;
+            color: white;
+            border-radius: 50%;
             text-align: center;
-        }
-
-        .settings-toggle {
+            line-height: 18px;
             font-size: 12px;
-            color: var(--text-sub);
             cursor: pointer;
-            user-select: none;
+            display: none; /* 默认隐藏 */
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .file-item:hover .file-delete {
+            display: block;
         }
 
+        /* 高级设置 */
+        .settings-wrapper { margin-bottom: 15px; text-align: center; }
+        .settings-toggle { font-size: 12px; color: var(--text-sub); cursor: pointer; user-select: none; }
         .settings-panel {
-            display: none; /* 默认折叠 */
+            display: none;
             margin-top: 10px;
             padding: 10px;
             background: #F9F9F9;
@@ -140,11 +158,7 @@
             justify-content: center;
             gap: 10px;
         }
-
-        .settings-panel.show {
-            display: flex;
-        }
-
+        .settings-panel.show { display: flex; }
         .rate-btn {
             padding: 6px 12px;
             border: 1px solid #D1D1D6;
@@ -155,17 +169,8 @@
             color: var(--text-main);
             transition: all 0.2s;
         }
-
-        .rate-btn:hover {
-            border-color: var(--primary-color);
-        }
-
-        .rate-btn.active {
-            border-color: var(--primary-color);
-            color: var(--primary-color);
-            background: rgba(0,122,255,0.05);
-            font-weight: 600;
-        }
+        .rate-btn:hover { border-color: var(--primary-color); }
+        .rate-btn.active { border-color: var(--primary-color); color: var(--primary-color); background: rgba(0,122,255,0.05); font-weight: 600; }
 
         .btn-download {
             width: 100%;
@@ -179,7 +184,6 @@
             cursor: pointer;
             transition: background 0.2s;
         }
-
         .btn-download:disabled { background-color: #D1D1D6; cursor: not-allowed; }
         .btn-download:not(:disabled):hover { background-color: #0066D6; }
     </style>
@@ -198,9 +202,14 @@
         <input type="file" id="fileInput" multiple accept=".flac,.wav,.mp3,.m4a,.ogg">
     </div>
 
+    <!-- D. 增加列表头部控制 -->
+    <div class="list-header">
+        <span id="fileCount">共 0 个文件</span>
+        <span class="clear-btn" id="clearBtn">清空列表</span>
+    </div>
+
     <div class="file-list" id="fileList"></div>
 
-    <!-- C. 新增高级设置 UI -->
     <div class="settings-wrapper">
         <div class="settings-toggle" id="settingsToggle">高级设置 ▼</div>
         <div class="settings-panel" id="settingsPanel">
@@ -218,8 +227,8 @@
 
 <script>
 /**
- * v3.2 核心逻辑
- * 更新：增加码率选择，增加转换前参数快照
+ * v3.3 核心逻辑
+ * 更新：增加清空/删除功能、进度数字显示、文件名校验、内存预警
  */
 
 const Utils = {
@@ -232,6 +241,10 @@ const Utils = {
     },
     getFileName(filename) {
         return filename.replace(/\.[^/.]+$/, "");
+    },
+    // E. 文件名清洗，防止特殊字符导致下载失败
+    sanitizeFilename(name) {
+        return name.replace(/[\\/:*?"<>|]/g, '_'); // 将特殊字符替换为下划线
     }
 };
 
@@ -252,7 +265,6 @@ const Decoder = {
     async decode(arrayBuffer) {
         const ctx = this.initContext();
         let audioBuffer;
-        
         try {
             audioBuffer = await ctx.decodeAudioData(arrayBuffer);
         } catch (e) {
@@ -260,12 +272,9 @@ const Decoder = {
             throw new Error("不支持的格式或文件损坏");
         }
 
-        // 强制 44.1kHz 重采样
         if (audioBuffer.sampleRate !== 44100) {
-            console.log(`检测到采样率 ${audioBuffer.sampleRate}Hz，正在重采样至 44.1kHz...`);
             return await this.resample(audioBuffer, 44100);
         }
-        
         return audioBuffer;
     },
 
@@ -275,56 +284,42 @@ const Decoder = {
         const offlineCtx = new OfflineAudioContext(channels, 
             Math.ceil(targetRate * duration), 
             targetRate);
-        
         const source = offlineCtx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(offlineCtx.destination);
         source.start(0);
-        
         return await offlineCtx.startRendering();
     }
 };
 
-/**
- * Encoder 模块更新
- * 接受 bitRate 参数，不再写死
- */
 const Encoder = {
-    config: {
-        sampleRate: 44100,
-        channels: 2
-    },
-
-    // 修改：增加 bitRate 参数
+    config: { sampleRate: 44100, channels: 2 },
     async encode(audioBuffer, bitRate = 320) {
-        if (typeof lamejs === 'undefined') {
-            throw new Error("编码库未加载");
-        }
+        if (typeof lamejs === 'undefined') throw new Error("编码库未加载");
 
-        const sampleRate = this.config.sampleRate;
-        // 使用传入的 bitRate
-        const mp3encoder = new lamejs.Mp3Encoder(this.config.channels, sampleRate, bitRate);
+        const { sampleRate, channels } = this.config;
+        const mp3encoder = new lamejs.Mp3Encoder(channels, sampleRate, bitRate);
         const mp3Data = [];
 
         const left = audioBuffer.getChannelData(0);
         const right = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : left;
-
         const samples = left.length;
+        
         const leftInt = new Int16Array(samples);
         const rightInt = new Int16Array(samples);
 
         for (let i = 0; i < samples; i++) {
-            const sLeft = Math.max(-1, Math.min(1, left[i]));
-            const sRight = Math.max(-1, Math.min(1, right[i]));
-            leftInt[i] = sLeft < 0 ? sLeft * 0x8000 : sLeft * 0x7FFF;
-            rightInt[i] = sRight < 0 ? sRight * 0x8000 : sRight * 0x7FFF;
+            const sL = Math.max(-1, Math.min(1, left[i]));
+            const sR = Math.max(-1, Math.min(1, right[i]));
+            leftInt[i] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+            rightInt[i] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
         }
 
         const block = 1152;
         for (let i = 0; i < samples; i += block) {
-            const leftChunk = leftInt.subarray(i, i + block);
-            const rightChunk = rightInt.subarray(i, i + block);
-            const mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
+            const lChunk = leftInt.subarray(i, i + block);
+            const rChunk = rightInt.subarray(i, i + block);
+            const mp3buf = mp3encoder.encodeBuffer(lChunk, rChunk);
             if (mp3buf.length > 0) mp3Data.push(mp3buf);
         }
         
@@ -338,15 +333,15 @@ const Encoder = {
 const App = {
     files: [],
     isProcessing: false,
-    currentBitRate: 320, // 默认码率
+    currentBitRate: 320,
 
     init() {
         this.dropZone = document.getElementById('dropZone');
         this.fileInput = document.getElementById('fileInput');
         this.fileList = document.getElementById('fileList');
         this.downloadBtn = document.getElementById('downloadBtn');
-        
-        // 初始化高级设置控件
+        this.clearBtn = document.getElementById('clearBtn');
+        this.fileCount = document.getElementById('fileCount');
         this.settingsToggle = document.getElementById('settingsToggle');
         this.settingsPanel = document.getElementById('settingsPanel');
         this.rateButtons = document.querySelectorAll('.rate-btn');
@@ -358,10 +353,7 @@ const App = {
         // 文件交互
         this.dropZone.addEventListener('click', () => this.fileInput.click());
         this.fileInput.addEventListener('change', (e) => this.handleFiles(e.target.files));
-        this.dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            this.dropZone.classList.add('dragover');
-        });
+        this.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); this.dropZone.classList.add('dragover'); });
         this.dropZone.addEventListener('dragleave', () => this.dropZone.classList.remove('dragover'));
         this.dropZone.addEventListener('drop', (e) => {
             e.preventDefault();
@@ -369,23 +361,21 @@ const App = {
             this.handleFiles(e.dataTransfer.files);
         });
 
+        // 下载与清空
         this.downloadBtn.addEventListener('click', () => this.downloadAll());
+        this.clearBtn.addEventListener('click', () => this.clearList());
 
-        // C. 码率选择交互
+        // 设置
         this.settingsToggle.addEventListener('click', () => {
             this.settingsPanel.classList.toggle('show');
-            const icon = this.settingsToggle.textContent.includes('▼') ? '▲' : '▼';
-            this.settingsToggle.textContent = `高级设置 ${icon}`;
+            this.settingsToggle.textContent = `高级设置 ${this.settingsPanel.classList.contains('show') ? '▲' : '▼'}`;
         });
-
         this.rateButtons.forEach(btn => {
             btn.addEventListener('click', (e) => {
-                // 防止处理过程中切换导致混乱，简单禁用处理中的切换逻辑（可选）
-                // 这里为了体验，允许切换，但只会影响下一次任务
                 this.rateButtons.forEach(b => b.classList.remove('active'));
                 e.target.classList.add('active');
                 this.currentBitRate = parseInt(e.target.dataset.rate);
-                this.updateUIState(); // 更新按钮文字
+                this.updateUIState();
             });
         });
     },
@@ -394,21 +384,19 @@ const App = {
         if (this.isProcessing) return;
         
         const allowedExt = ['flac', 'wav', 'mp3', 'm4a', 'ogg'];
-        const validFiles = Array.from(filesList).filter(f => {
-            const ext = f.name.split('.').pop().toLowerCase();
-            return allowedExt.includes(ext);
-        });
-
+        const validFiles = Array.from(filesList).filter(f => allowedExt.includes(f.name.split('.').pop().toLowerCase()));
+        
         if (validFiles.length === 0) return;
+
+        // E. 内存预警 (阈值 500MB)
+        const totalSize = validFiles.reduce((sum, f) => sum + f.size, 0);
+        if (totalSize > 500 * 1024 * 1024) {
+            if (!confirm('文件总大小超过 500MB，可能导致浏览器卡顿或崩溃，是否继续？')) return;
+        }
 
         validFiles.forEach(file => {
             const id = Date.now() + Math.random();
-            this.files.push({
-                id: id,
-                file: file,
-                status: '等待',
-                blob: null
-            });
+            this.files.push({ id, file, status: '等待', blob: null, error: '' });
             this.renderFileItem(id, file, '等待');
         });
 
@@ -416,7 +404,16 @@ const App = {
         this.startProcessing();
     },
 
-    renderFileItem(id, file, status) {
+    // D. 清空列表
+    clearList() {
+        if (this.isProcessing) return;
+        this.files = [];
+        this.fileList.innerHTML = '';
+        this.updateUIState();
+    },
+
+    // D. 渲染文件项
+    renderFileItem(id, file, status, error = '') {
         let itemEl = document.querySelector(`[data-id="${id}"]`);
         
         if (!itemEl) {
@@ -430,11 +427,28 @@ const App = {
                     <span class="file-meta">${Utils.formatFileSize(file.size)}</span>
                 </div>
                 <span class="file-status">${status}</span>
+                <div class="file-delete" title="移除文件">×</div>
             `;
+            
+            // D. 绑定删除事件
+            itemEl.querySelector('.file-delete').addEventListener('click', (e) => {
+                e.stopPropagation(); // 防止触发其他事件
+                this.removeFile(id);
+            });
+
+            // E. 错误详情点击
+            itemEl.querySelector('.file-status').addEventListener('click', () => {
+                const item = this.files.find(f => f.id === id);
+                if (item && item.status === '错误') {
+                    alert(item.error || '未知错误');
+                }
+            });
+
             this.fileList.appendChild(itemEl);
         } else {
-            itemEl.querySelector('.file-status').textContent = status;
-            itemEl.querySelector('.file-status').className = `file-status ${status === '完成' ? 'done' : (status === '错误' ? 'error' : 'converting')}`;
+            const statusEl = itemEl.querySelector('.file-status');
+            statusEl.textContent = status;
+            statusEl.className = `file-status ${status === '完成' ? 'done' : (status === '错误' ? 'error' : 'converting')}`;
             
             if (status === '完成') {
                 itemEl.querySelector('.file-name').textContent = Utils.getFileName(file.name) + '.mp3';
@@ -442,15 +456,25 @@ const App = {
         }
     },
 
+    // D. 移除单个文件
+    removeFile(id) {
+        if (this.isProcessing) return; // 转换中禁止移除，防止逻辑混乱
+        this.files = this.files.filter(f => f.id !== id);
+        const el = document.querySelector(`[data-id="${id}"]`);
+        if (el) el.remove();
+        this.updateUIState();
+    },
+
     async startProcessing() {
         if (this.isProcessing) return;
         this.isProcessing = true;
         
-        // 关键：在处理开始时“快照”当前的码率设置
-        // 这样在长任务过程中用户点击其他码率，不会影响当前正在进行的编码
         const targetBitRate = this.currentBitRate;
+        const totalTasks = this.files.length;
         
-        this.updateUIState(); // 更新按钮为禁用状态
+        this.updateUIState(); // 禁用按钮
+
+        let completedCount = 0;
 
         for (let i = 0; i < this.files.length; i++) {
             const item = this.files[i];
@@ -459,21 +483,24 @@ const App = {
             item.status = '转换中';
             this.renderFileItem(item.id, item.file, '转换中');
 
+            // D. 更新进度数字
+            this.downloadBtn.textContent = `正在转换 (${i + 1}/${totalTasks})...`;
+
             try {
                 const arrayBuffer = await item.file.arrayBuffer();
                 const audioBuffer = await Decoder.decode(arrayBuffer);
-                
-                // 使用快照的码率进行编码
                 const mp3Blob = await Encoder.encode(audioBuffer, targetBitRate);
                 
                 item.blob = mp3Blob;
                 item.status = '完成';
                 this.renderFileItem(item.id, item.file, '完成');
+                completedCount++;
 
             } catch (e) {
                 console.error(e);
                 item.status = '错误';
-                this.renderFileItem(item.id, item.file, '错误');
+                item.error = e.message || "转换失败";
+                this.renderFileItem(item.id, item.file, '错误', item.error);
             }
         }
 
@@ -485,13 +512,17 @@ const App = {
         const completedCount = this.files.filter(f => f.status === '完成').length;
         const totalCount = this.files.length;
         const rateText = `MP3 ${this.currentBitRate}kbps`;
+        
+        // 更新顶部统计
+        this.fileCount.textContent = `共 ${totalCount} 个文件`;
+        this.clearBtn.style.visibility = totalCount > 0 ? 'visible' : 'hidden';
 
-        if (totalCount > 0 && completedCount === totalCount) {
+        if (this.isProcessing) {
+            // 转换中状态由 startProcessing 实时更新
+            this.downloadBtn.disabled = true;
+        } else if (totalCount > 0 && completedCount === totalCount) {
             this.downloadBtn.textContent = `下载全部 (${completedCount} 个文件)`;
             this.downloadBtn.disabled = false;
-        } else if (totalCount > 0 && this.isProcessing) {
-            this.downloadBtn.textContent = `正在转换...`;
-            this.downloadBtn.disabled = true;
         } else {
             this.downloadBtn.textContent = `下载全部 (${rateText})`;
             this.downloadBtn.disabled = true;
@@ -500,16 +531,16 @@ const App = {
 
     async downloadAll() {
         const completedFiles = this.files.filter(f => f.status === '完成' && f.blob);
-        const count = completedFiles.length;
-        if (count === 0) return;
+        if (completedFiles.length === 0) return;
 
         this.downloadBtn.textContent = "正在打包...";
         this.downloadBtn.disabled = true;
 
         const zip = new JSZip();
         completedFiles.forEach(item => {
-            const filename = Utils.getFileName(item.file.name) + '.mp3';
-            zip.file(filename, item.blob);
+            // E. 使用清洗后的文件名
+            const safeName = Utils.sanitizeFilename(Utils.getFileName(item.file.name));
+            zip.file(safeName + '.mp3', item.blob);
         });
         
         const content = await zip.generateAsync({ type: 'blob' });
@@ -520,7 +551,6 @@ const App = {
 };
 
 document.addEventListener('DOMContentLoaded', () => App.init());
-
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
