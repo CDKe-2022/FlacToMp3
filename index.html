@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Audio转换器</title>
+    <title>Pro Audio Converter (FFmpeg版)</title>
     <style>
         :root {
             --primary-color: #2563eb;
@@ -227,7 +227,7 @@
 
     <div class="container">
         <header>
-            <h1>Pro Audio转换器 <span style="font-size: 0.5em; color: var(--text-sub); vertical-align: middle;">v2.0</span></h1>
+            <h1>Pro Audio Converter <span style="font-size: 0.5em; color: var(--text-sub); vertical-align: middle;">v2.1</span></h1>
             <p class="subtitle">基于 WebAssembly，专为老款车机优化的极速转换</p>
             <div id="core-status">正在初始化...</div>
             <div id="core-warning">⚠️ 提示：如果加载停滞，请检查 ffmpeg 文件夹路径。</div>
@@ -261,12 +261,10 @@
 
     <script>
         // ------------------------------------------------------------
-        // 1. 全局变量修正 (修复 FFmpegWASM is not defined)
+        // 1. 全局变量
         // ------------------------------------------------------------
-        // 注意：在 0.11.6 版本的 CDN 构建中，全局变量名是 FFmpeg
         const { createFFmpeg, fetchFile } = window.FFmpeg;
 
-        // 状态管理
         const state = {
             ffmpeg: null,
             ffmpegLoaded: false,
@@ -274,7 +272,6 @@
             isConverting: false
         };
 
-        // UI 元素
         const els = {
             dropZone: document.getElementById('drop-zone'),
             fileInput: document.getElementById('file-input'),
@@ -286,13 +283,13 @@
         };
 
         // ------------------------------------------------------------
-        // 2. 初始化 FFmpeg
+        // 2. 初始化 FFmpeg (移除了导致崩溃的 on 事件监听)
         // ------------------------------------------------------------
         async function loadFFmpeg() {
             if (state.ffmpegLoaded) return;
 
             try {
-                // ⭐ 关键配置：指定本地路径
+                // ⭐ 强制指定本地文件路径
                 state.ffmpeg = createFFmpeg({
                     log: true,
                     corePath: './ffmpeg/ffmpeg-core.js',
@@ -300,13 +297,8 @@
                     workerPath: './ffmpeg/ffmpeg-core.worker.js'
                 });
 
-                // 绑定进度事件
-                state.ffmpeg.on('progress', ({ progress, time }) => {
-                    const currentId = state.currentConvertingId;
-                    if (currentId) {
-                        updateFileStatus(currentId, progress * 100, `转换中 ${(progress * 100).toFixed(0)}%`);
-                    }
-                });
+                // 注意：0.11.6 版本的 createFFmpeg 不支持 .on('progress') 监听
+                // 因此这里不再绑定进度事件，避免报错 "state.ffmpeg.on is not a function"
 
                 await state.ffmpeg.load();
                 
@@ -324,13 +316,13 @@
             }
         }
 
-        // 启动加载
         window.addEventListener('DOMContentLoaded', loadFFmpeg);
 
         // ------------------------------------------------------------
         // 3. 文件处理逻辑
         // ------------------------------------------------------------
         function generateId() { return Math.random().toString(36).substr(2, 9); }
+        
         function formatSize(bytes) {
             if (bytes === 0) return '0 B';
             const k = 1024;
@@ -346,7 +338,7 @@
 
             Array.from(fileList).forEach(file => {
                 const id = generateId();
-                const fileObj = { id, file, status: 'ready', progress: 0 };
+                const fileObj = { id, file, status: 'ready' };
                 state.files.push(fileObj);
                 renderFileItem(fileObj);
             });
@@ -363,20 +355,14 @@
                     <div class="file-meta">${formatSize(fileObj.file.size)}</div>
                 </div>
                 <div class="file-actions">
-                    <div class="progress-bar" id="prog-bar-${fileObj.id}">
-                        <div class="progress-fill" id="prog-fill-${fileObj.id}"></div>
-                    </div>
                     <span class="status-text" id="status-text-${fileObj.id}">等待</span>
                 </div>
             `;
             els.fileList.appendChild(li);
         }
 
-        function updateFileStatus(id, progress, text) {
-            const bar = document.getElementById(`prog-bar-${id}`);
-            const fill = document.getElementById(`prog-fill-${id}`);
+        function updateFileStatus(id, text) {
             const txt = document.getElementById(`status-text-${id}`);
-            if (bar && fill) { bar.style.display = 'block'; fill.style.width = `${progress}%`; }
             if (txt) txt.textContent = text || '';
         }
 
@@ -392,15 +378,14 @@
 
             for (let i = 0; i < queue.length; i++) {
                 const item = queue[i];
-                state.currentConvertingId = item.id;
                 
                 try {
-                    updateFileStatus(item.id, 0, '准备...');
+                    updateFileStatus(item.id, '转换中...');
                     
                     const inputName = `input.${item.file.name.split('.').pop()}`;
                     const outputName = `output_${item.id}.mp3`;
 
-                    // 使用全局 fetchFile
+                    // 写入文件
                     state.ffmpeg.FS('writeFile', inputName, await fetchFile(item.file));
 
                     // 执行转换
@@ -420,17 +405,16 @@
                     state.ffmpeg.FS('unlink', inputName);
                     state.ffmpeg.FS('unlink', outputName);
 
-                    updateFileStatus(item.id, 100, '完成');
+                    updateFileStatus(item.id, '完成');
                     item.status = 'done';
 
                 } catch (err) {
                     console.error(err);
-                    updateFileStatus(item.id, 0, '失败');
+                    updateFileStatus(item.id, '失败');
                 }
             }
 
             state.isConverting = false;
-            state.currentConvertingId = null;
             updateUIState();
             alert('转换任务已完成！');
         }
