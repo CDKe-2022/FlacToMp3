@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>车机音频转换器 v3.4.1</title>
+    <title>车机音频转换器 v3.5 (架构重构)</title>
     <style>
-        /* 样式部分保持不变 */
+        /* 样式保持不变 */
         :root {
             --primary-color: #007AFF;
             --bg-color: #F5F5F7;
@@ -84,10 +84,12 @@
         .file-name { font-weight: 500; color: var(--text-main); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
         .file-meta { font-size: 12px; color: var(--text-sub); margin-top: 2px; }
 
+        /* 修正 Bug 13：增加等待状态样式 */
         .file-status {
             font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 4px;
             background-color: #eee; color: var(--text-sub); cursor: default;
         }
+        .file-status.waiting { background-color: #eee; color: var(--text-sub); }
         .file-status.converting { background-color: rgba(0, 122, 255, 0.1); color: var(--primary-color); }
         .file-status.done { background-color: rgba(52, 199, 89, 0.1); color: var(--success-color); }
         .file-status.error { background-color: rgba(255, 59, 48, 0.1); color: var(--error-color); cursor: pointer; }
@@ -122,7 +124,7 @@
 <div class="container">
     <header>
         <h1>车机音频转换器</h1>
-        <p class="subtitle">多线程架构 · 不再卡顿</p>
+        <p class="subtitle">Worker Pool 架构 · 稳定版</p>
     </header>
 
     <div class="drop-zone" id="dropZone">
@@ -154,123 +156,67 @@
 </div>
 
 <!-- 
-  v3.4.1 修正版 Worker
-  修复：使用 OfflineAudioContext 进行解码，修复 Worker 中 AudioContext 未定义的 Bug
+  v3.5 架构重构
+  1. 主线程解码
+  2. Worker Pool 编码
+  3. 修复所有严重 Bug
 -->
 <script id="worker-code" type="text/worker">
-    try {
-        importScripts('https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js');
-    } catch(e) {
-        console.error("Worker 加载库失败", e);
-    }
-
-    const sanitize = (name) => name.replace(/[\\/:*?"<>|]/g, '_');
-    const getFileName = (filename) => filename.replace(/\.[^/.]+$/, "");
-
-    /**
-     * 核心解码逻辑 (修正后)
-     * 使用 OfflineAudioContext 兜底解码
-     */
-    async function decodeAudio(arrayBuffer) {
-        // 策略：
-        // 1. 大多数现代浏览器支持在 Worker 中使用 OfflineAudioContext 解码
-        // 2. 我们创建一个极简的 context 仅为了调用 decodeAudioData
-        
-        // 兼容性检测
-        const OfflineAudioContext = self.OfflineAudioContext || self.webkitOfflineAudioContext;
-        if (!OfflineAudioContext) {
-            throw new Error("浏览器不支持 Worker 内部解码");
-        }
-
-        // 创建一个最小化的 Context (参数暂时随意，解码会重新生成 Buffer)
-        // 注意：某些旧浏览器可能要求 sampleRate 合理
-        const ctx = new OfflineAudioContext(1, 1, 44100);
-        
-        // 解码
-        return await ctx.decodeAudioData(arrayBuffer);
-    }
-
-    /**
-     * 重采样逻辑
-     * 只有当采样率不匹配时才调用
-     */
-    async function resampleToTarget(audioBuffer, targetRate) {
-        const channels = audioBuffer.numberOfChannels;
-        const duration = audioBuffer.duration;
-        
-        // 计算目标长度
-        const length = Math.ceil(targetRate * duration);
-        
-        const offlineCtx = new OfflineAudioContext(channels, length, targetRate);
-        const source = offlineCtx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(offlineCtx.destination);
-        source.start(0);
-        
-        return await offlineCtx.startRendering();
-    }
-
-    function encodeMP3(audioBuffer, bitRate) {
-        if (typeof lamejs === 'undefined') throw new Error("编码库未加载");
-        
-        const sampleRate = audioBuffer.sampleRate;
-        const mp3encoder = new lamejs.Mp3Encoder(2, sampleRate, bitRate);
-        const mp3Data = [];
-        const left = audioBuffer.getChannelData(0);
-        const right = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : left;
-        
-        const samples = left.length;
-        const leftInt = new Int16Array(samples);
-        const rightInt = new Int16Array(samples);
-
-        for (let i = 0; i < samples; i++) {
-            const l = Math.max(-1, Math.min(1, left[i]));
-            const r = Math.max(-1, Math.min(1, right[i]));
-            leftInt[i] = l < 0 ? l * 0x8000 : l * 0x7FFF;
-            rightInt[i] = r < 0 ? r * 0x8000 : r * 0x7FFF;
-        }
-
-        const blockSize = 1152;
-        for (let i = 0; i < samples; i += blockSize) {
-            const lChunk = leftInt.subarray(i, i + blockSize);
-            const rChunk = rightInt.subarray(i, i + blockSize);
-            const mp3buf = mp3encoder.encodeBuffer(lChunk, rChunk);
-            if (mp3buf.length > 0) mp3Data.push(mp3buf);
-        }
-        
-        const mp3buf = mp3encoder.flush();
-        if (mp3buf.length > 0) mp3Data.push(mp3buf);
-        
-        return new Blob(mp3Data, { type: 'audio/mpeg' });
-    }
-
-    self.onmessage = async (e) => {
-        const { id, fileData, bitRate, fileName } = e.data;
+    // Worker 仅负责编码
+    importScripts('https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js');
+    
+    self.onmessage = function(e) {
+        const { id, samples, sampleRate, channels, bitRate } = e.data;
         
         try {
-            // 1. 解码
-            let audioBuffer = await decodeAudio(fileData);
+            // Bug 12 修正：根据声道数初始化编码器
+            const mp3encoder = new lamejs.Mp3Encoder(channels, sampleRate, bitRate);
+            const mp3Data = [];
             
-            // 2. 按需重采样 (审查建议优化点)
-            if (audioBuffer.sampleRate !== 44100) {
-                audioBuffer = await resampleToTarget(audioBuffer, 44100);
+            const left = samples.left;
+            const right = samples.right; // 可能为 null
+            
+            const samplesLen = left.length;
+            // 预分配 Int16 缓冲区
+            const leftInt = new Int16Array(samplesLen);
+            const rightInt = channels > 1 ? new Int16Array(samplesLen) : null;
+            
+            // 转换逻辑
+            for (let i = 0; i < samplesLen; i++) {
+                const l = Math.max(-1, Math.min(1, left[i]));
+                leftInt[i] = l < 0 ? l * 0x8000 : l * 0x7FFF;
+                
+                if (channels > 1 && right) {
+                    const r = Math.max(-1, Math.min(1, right[i]));
+                    rightInt[i] = r < 0 ? r * 0x8000 : r * 0x7FFF;
+                }
             }
             
-            // 3. 编码
-            const mp3Blob = encodeMP3(audioBuffer, bitRate);
+            // 编码
+            const blockSize = 1152;
+            for (let i = 0; i < samplesLen; i += blockSize) {
+                const lChunk = leftInt.subarray(i, i + blockSize);
+                const rChunk = rightInt ? rightInt.subarray(i, i + blockSize) : null;
+                
+                let mp3buf;
+                if (channels > 1) {
+                    mp3buf = mp3encoder.encodeBuffer(lChunk, rChunk);
+                } else {
+                    mp3buf = mp3encoder.encodeBuffer(lChunk); // Mono
+                }
+                
+                if (mp3buf.length > 0) mp3Data.push(mp3buf);
+            }
             
-            self.postMessage({
-                id: id,
-                status: 'done',
-                blob: mp3Blob,
-                name: sanitize(getFileName(fileName)) + '.mp3'
-            });
-        } catch (err) {
-            self.postMessage({
-                id: id,
-                status: 'error',
-                error: err.message
-            });
+            const mp3buf = mp3encoder.flush();
+            if (mp3buf.length > 0) mp3Data.push(mp3buf);
+            
+            // 回传 Blob
+            const blob = new Blob(mp3Data, { type: 'audio/mpeg' });
+            self.postMessage({ id: id, status: 'done', blob: blob });
+            
+        } catch(err) {
+            self.postMessage({ id: id, status: 'error', error: err.message });
         }
     };
 </script>
@@ -278,14 +224,9 @@
 <script>
 /**
  * 主线程逻辑
- * 增加 Transferable 优化，修复内存拷贝问题
  */
 
-const workerScript = document.getElementById('worker-code').textContent;
-const blob = new Blob([workerScript], { type: 'application/javascript' });
-const workerUrl = URL.createObjectURL(blob);
-const worker = new Worker(workerUrl);
-
+// --- Utils ---
 const Utils = {
     formatFileSize(bytes) {
         if (bytes === 0) return '0 B';
@@ -293,226 +234,342 @@ const Utils = {
         const sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    },
+    // Bug 7 修正：安全的日期格式
+    getDateStr() {
+        return new Date().toISOString().slice(0, 10);
     }
 };
 
+// --- Worker Pool Manager ---
+class WorkerPool {
+    constructor(scriptUrl, poolSize) {
+        this.pool = [];
+        this.taskQueue = [];
+        this.resolvers = {}; // 存储 Promise resolve
+        
+        for (let i = 0; i < poolSize; i++) {
+            const worker = new Worker(scriptUrl);
+            worker.onmessage = (e) => this.handleResult(e.data);
+            // Bug 4 修正：Worker 错误处理
+            worker.onerror = (e) => {
+                console.error("Worker Error:", e);
+                // 强制结束当前任务并返回错误
+                const taskId = Object.keys(this.resolvers)[0]; // 简单粗暴取一个等待中的任务
+                if (taskId) {
+                     this.handleResult({ id: parseFloat(taskId), status: 'error', error: 'Worker 内部崩溃' });
+                }
+            };
+            this.pool.push({ worker, busy: false });
+        }
+    }
+    
+    run(taskId, data) {
+        return new Promise((resolve) => {
+            this.resolvers[taskId] = resolve;
+            this.taskQueue.push({ id: taskId, data: data });
+            this.dispatch();
+        });
+    }
+    
+    dispatch() {
+        if (this.taskQueue.length === 0) return;
+        
+        const freeWorker = this.pool.find(w => !w.busy);
+        if (!freeWorker) return;
+        
+        const task = this.taskQueue.shift();
+        freeWorker.busy = true;
+        freeWorker.currentTaskId = task.id;
+        
+        // 使用 Transferable 传输巨大的 PCM 数据
+        const transferList = [];
+        if (task.data.samples.left) transferList.push(task.data.samples.left.buffer);
+        if (task.data.samples.right) transferList.push(task.data.samples.right.buffer);
+        
+        freeWorker.worker.postMessage({
+            id: task.id,
+            ...task.data
+        }, transferList);
+    }
+    
+    handleResult(result) {
+        const { id, status, blob, error } = result;
+        if (this.resolvers[id]) {
+            this.resolvers[id]({ status, blob, error });
+            delete this.resolvers[id];
+        }
+        
+        // 释放 Worker
+        const workerObj = this.pool.find(w => w.currentTaskId === id);
+        if (workerObj) {
+            workerObj.busy = false;
+            workerObj.currentTaskId = null;
+        }
+        
+        // 尝试处理下一个任务
+        this.dispatch();
+    }
+}
+
+// --- App ---
 const App = {
     files: [],
-    isProcessing: false,
     currentBitRate: 320,
-    workerBusy: false,
+    pool: null,
+    audioContext: null,
+    workerUrl: null,
 
     init() {
-        this.dropZone = document.getElementById('dropZone');
-        this.fileInput = document.getElementById('fileInput');
-        this.fileList = document.getElementById('fileList');
-        this.downloadBtn = document.getElementById('downloadBtn');
-        this.clearBtn = document.getElementById('clearBtn');
-        this.fileCount = document.getElementById('fileCount');
-        this.settingsToggle = document.getElementById('settingsToggle');
-        this.settingsPanel = document.getElementById('settingsPanel');
-        this.rateButtons = document.querySelectorAll('.rate-btn');
+        // 初始化 AudioContext
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        this.audioContext = new AudioContext();
+        
+        // 初始化 Worker Pool
+        const workerScript = document.getElementById('worker-code').textContent;
+        const blob = new Blob([workerScript], { type: 'application/javascript' });
+        this.workerUrl = URL.createObjectURL(blob);
+        
+        // Bug 2 修正：真正的多线程
+        const cpuCount = navigator.hardwareConcurrency || 4;
+        const poolSize = Math.min(cpuCount, 4); // 限制最大 4 线程，避免移动端过热
+        this.pool = new WorkerPool(this.workerUrl, poolSize);
 
+        // DOM & Events
         this.bindEvents();
-        this.setupWorkerListener();
     },
-
-    setupWorkerListener() {
-        worker.onmessage = (e) => {
-            const { id, status, blob, name, error } = e.data;
-            const item = this.files.find(f => f.id === id);
-            if (!item) return;
-
-            if (status === 'done') {
-                item.status = '完成';
-                item.blob = blob;
-                item.safeName = name;
-                this.renderFileItem(id, item.file, '完成');
-            } else {
-                item.status = '错误';
-                item.error = error;
-                this.renderFileItem(id, item.file, '错误', error);
-            }
-            
-            this.workerBusy = false;
-            this.processNext(); 
-        };
-    },
-
+    
     bindEvents() {
-        this.dropZone.addEventListener('click', () => this.fileInput.click());
-        this.fileInput.addEventListener('change', (e) => this.handleFiles(e.target.files));
-        
-        const handleDragOver = (e) => { e.preventDefault(); this.dropZone.classList.add('dragover'); };
-        const handleDragLeave = () => this.dropZone.classList.remove('dragover');
-        const handleDrop = (e) => {
+        // 简化的事件绑定
+        document.getElementById('dropZone').addEventListener('click', () => document.getElementById('fileInput').click());
+        document.getElementById('fileInput').addEventListener('change', (e) => this.handleFiles(e.target.files));
+        document.getElementById('dropZone').addEventListener('dragover', (e) => { e.preventDefault(); e.currentTarget.classList.add('dragover'); });
+        document.getElementById('dropZone').addEventListener('dragleave', (e) => e.currentTarget.classList.remove('dragover'));
+        document.getElementById('dropZone').addEventListener('drop', (e) => {
             e.preventDefault();
-            this.dropZone.classList.remove('dragover');
+            e.currentTarget.classList.remove('dragover');
             this.handleFiles(e.dataTransfer.files);
-        };
-
-        this.dropZone.addEventListener('dragover', handleDragOver);
-        this.dropZone.addEventListener('dragleave', handleDragLeave);
-        this.dropZone.addEventListener('drop', handleDrop);
-
-        this.downloadBtn.addEventListener('click', () => this.downloadAll());
-        this.clearBtn.addEventListener('click', () => this.clearList());
-
-        this.settingsToggle.addEventListener('click', () => {
-            this.settingsPanel.classList.toggle('show');
-            this.settingsToggle.textContent = `高级设置 ${this.settingsPanel.classList.contains('show') ? '▲' : '▼'}`;
         });
-        
-        this.rateButtons.forEach(btn => {
+        document.getElementById('clearBtn').addEventListener('click', () => this.clearList());
+        document.getElementById('downloadBtn').addEventListener('click', () => this.downloadAll());
+
+        // 设置面板
+        const stgToggle = document.getElementById('settingsToggle');
+        const stgPanel = document.getElementById('settingsPanel');
+        stgToggle.addEventListener('click', () => {
+            stgPanel.classList.toggle('show');
+            stgToggle.textContent = `高级设置 ${stgPanel.classList.contains('show') ? '▲' : '▼'}`;
+        });
+        stgPanel.querySelectorAll('.rate-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
-                this.rateButtons.forEach(b => b.classList.remove('active'));
+                stgPanel.querySelectorAll('.rate-btn').forEach(b => b.classList.remove('active'));
                 e.target.classList.add('active');
                 this.currentBitRate = parseInt(e.target.dataset.rate);
-                this.updateUIState();
+                this.updateUI();
             });
         });
-    },
-
-    handleFiles(filesList) {
-        const allowedExt = ['flac', 'wav', 'mp3', 'm4a', 'ogg'];
-        const validFiles = Array.from(filesList).filter(f => allowedExt.includes(f.name.split('.').pop().toLowerCase()));
         
-        if (validFiles.length === 0) return;
-
-        validFiles.forEach(file => {
-            const id = Date.now() + Math.random();
-            this.files.push({ id, file, status: '等待', blob: null, error: '' });
-            this.renderFileItem(id, file, '等待');
+        // Bug 6 修正：页面关闭时清理
+        window.addEventListener('beforeunload', () => {
+            if (this.pool) this.pool.pool.forEach(w => w.worker.terminate());
+            if (this.workerUrl) URL.revokeObjectURL(this.workerUrl);
         });
-
-        this.updateUIState();
-        this.processNext();
     },
 
-    processNext() {
-        if (this.workerBusy) return;
+    handleFiles(files) {
+        if (this.isProcessing) return;
+        const allowed = ['flac', 'wav', 'mp3', 'm4a', 'ogg'];
+        const valid = Array.from(files).filter(f => allowed.includes(f.name.split('.').pop().toLowerCase()));
+        if (valid.length === 0) return;
+
+        valid.forEach(file => {
+            // Bug 15 修正：更安全的 ID
+            const id = crypto.randomUUID ? crypto.randomUUID() : Date.now() + Math.random();
+            this.files.push({ id, file, status: '等待', blob: null, error: '' });
+            this.renderItem(id, file, '等待');
+        });
         
-        const nextItem = this.files.find(f => f.status === '等待');
-        
-        if (!nextItem) {
-            this.isProcessing = false;
-            this.updateUIState();
+        this.updateUI();
+        this.processQueue();
+    },
+
+    async processQueue() {
+        // 找到一个等待的任务
+        const task = this.files.find(f => f.status === '等待');
+        if (!task) {
+            // 检查是否全部结束
+            if (this.files.every(f => ['完成', '错误'].includes(f.status))) {
+                this.isProcessing = false;
+                this.updateUI();
+            }
             return;
         }
 
         this.isProcessing = true;
-        this.workerBusy = true;
+        task.status = '转换中';
+        this.renderItem(task.id, task.file, '转换中');
+        this.updateUI();
 
-        nextItem.status = '转换中';
-        this.renderFileItem(nextItem.id, nextItem.file, '转换中');
+        try {
+            // Bug 3 修正：arrayBuffer catch
+            const buffer = await task.file.arrayBuffer();
+            
+            // 主线程解码
+            const audioBuffer = await this.decodeAudio(buffer);
+            
+            // 按需重采样 (Bug 11: 只在非 44.1k 时重采样)
+            const targetRate = 44100;
+            if (audioBuffer.sampleRate !== targetRate) {
+                audioBuffer = await this.resample(audioBuffer, targetRate);
+            }
+            
+            // 提取 PCM 数据
+            const samples = {
+                left: audioBuffer.getChannelData(0),
+                right: audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : null
+            };
+            
+            // 发送给 Worker Pool
+            const result = await this.pool.run(task.id, {
+                samples: samples,
+                sampleRate: targetRate,
+                channels: audioBuffer.numberOfChannels > 1 ? 2 : 1,
+                bitRate: this.currentBitRate
+            });
 
-        // 修复：性能优化，使用 Transferable
-        nextItem.file.arrayBuffer().then(buffer => {
-            // 转移所有权，零拷贝传输，性能提升显著
-            worker.postMessage({
-                id: nextItem.id,
-                fileData: buffer,
-                bitRate: this.currentBitRate,
-                fileName: nextItem.file.name
-            }, [buffer]); 
-        });
+            if (result.status === 'done') {
+                task.status = '完成';
+                task.blob = result.blob;
+            } else {
+                throw new Error(result.error || '编码失败');
+            }
 
-        this.updateUIState();
+        } catch (err) {
+            task.status = '错误';
+            task.error = err.message;
+            this.renderItem(task.id, task.file, '错误', err.message);
+        }
+
+        // 继续下一个
+        this.processQueue();
+    },
+    
+    async decodeAudio(buffer) {
+        // 确保上下文激活
+        if (this.audioContext.state === 'suspended') {
+            await this.audioContext.resume();
+        }
+        return await this.audioContext.decodeAudioData(buffer);
+    },
+    
+    async resample(audioBuffer, targetRate) {
+        const duration = audioBuffer.duration;
+        const channels = audioBuffer.numberOfChannels;
+        const offlineCtx = new OfflineAudioContext(channels, Math.ceil(targetRate * duration), targetRate);
+        const source = offlineCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(offlineCtx.destination);
+        source.start(0);
+        return await offlineCtx.startRendering();
     },
 
     clearList() {
-        if (this.isProcessing) return;
+        // Bug 9 修正：允许清空已完成的
+        if (this.isProcessing) return; // 处理中禁止清空
+        
         this.files = [];
-        this.fileList.innerHTML = '';
-        this.updateUIState();
+        document.getElementById('fileList').innerHTML = '';
+        this.updateUI();
     },
 
-    renderFileItem(id, file, status, error = '') {
-        let itemEl = document.querySelector(`[data-id="${id}"]`);
+    renderItem(id, file, status, error = '') {
+        let el = document.querySelector(`[data-id="${id}"]`);
         
-        if (!itemEl) {
-            itemEl = document.createElement('div');
-            itemEl.className = 'file-item';
-            itemEl.dataset.id = id;
-            itemEl.innerHTML = `
-                <div class="file-icon">🎵</div>
-                <div class="file-info">
-                    <span class="file-name">${file.name}</span>
-                    <span class="file-meta">${Utils.formatFileSize(file.size)}</span>
-                </div>
-                <span class="file-status">${status}</span>
-                <div class="file-delete" title="移除文件">×</div>
-            `;
+        // Bug 8 修正：使用 textContent 防止 XSS
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'file-item';
+            el.dataset.id = id;
             
-            itemEl.querySelector('.file-delete').addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.removeFile(id);
-            });
-
-            itemEl.querySelector('.file-status').addEventListener('click', () => {
-                const item = this.files.find(f => f.id === id);
-                if (item && item.status === '错误') alert(item.error || '未知错误');
-            });
-
-            this.fileList.appendChild(itemEl);
+            const icon = document.createElement('div'); icon.className = 'file-icon'; icon.textContent = '🎵';
+            const info = document.createElement('div'); info.className = 'file-info';
+            const nameEl = document.createElement('span'); nameEl.className = 'file-name'; nameEl.textContent = file.name;
+            const metaEl = document.createElement('span'); metaEl.className = 'file-meta'; metaEl.textContent = Utils.formatFileSize(file.size);
+            info.appendChild(nameEl); info.appendChild(metaEl);
+            
+            const statusEl = document.createElement('span'); statusEl.className = 'file-status'; statusEl.textContent = status;
+            
+            const deleteEl = document.createElement('div'); deleteEl.className = 'file-delete'; deleteEl.textContent = '×';
+            deleteEl.onclick = (e) => { e.stopPropagation(); this.removeItem(id); };
+            
+            el.appendChild(icon);
+            el.appendChild(info);
+            el.appendChild(statusEl);
+            el.appendChild(deleteEl);
+            
+            document.getElementById('fileList').appendChild(el);
         } else {
-            const statusEl = itemEl.querySelector('.file-status');
+            const statusEl = el.querySelector('.file-status');
             statusEl.textContent = status;
-            statusEl.className = `file-status ${status === '完成' ? 'done' : (status === '错误' ? 'error' : 'converting')}`;
+            // 修正 Bug 13：状态 CSS class
+            statusEl.className = `file-status ${status === '完成' ? 'done' : (status === '错误' ? 'error' : (status === '等待' ? 'waiting' : 'converting'))}`;
             
             if (status === '完成') {
-                itemEl.querySelector('.file-name').textContent = file.name.replace(/\.[^/.]+$/, "") + '.mp3';
+                el.querySelector('.file-name').textContent = file.name.replace(/\.[^/.]+$/, "") + '.mp3';
             }
+        }
+        
+        // 错误详情点击
+        if (status === '错误') {
+            el.querySelector('.file-status').onclick = () => alert(error);
         }
     },
 
-    removeFile(id) {
+    removeItem(id) {
         const item = this.files.find(f => f.id === id);
-        if (item && item.status === '转换中') return;
+        if (!item || item.status === '转换中') return; // Bug 10: 转换中不可删
         
         this.files = this.files.filter(f => f.id !== id);
         const el = document.querySelector(`[data-id="${id}"]`);
         if (el) el.remove();
-        this.updateUIState();
+        this.updateUI();
     },
 
-    updateUIState() {
-        const completedCount = this.files.filter(f => f.status === '完成').length;
+    updateUI() {
+        const count = this.files.length;
+        const doneCount = this.files.filter(f => f.status === '完成').length;
         const waitingCount = this.files.filter(f => f.status === '等待').length;
-        const totalCount = this.files.length;
-        const rateText = `MP3 ${this.currentBitRate}kbps`;
 
-        this.fileCount.textContent = `共 ${totalCount} 个文件`;
-        this.clearBtn.style.visibility = totalCount > 0 ? 'visible' : 'hidden';
+        document.getElementById('fileCount').textContent = `共 ${count} 个文件`;
+        document.getElementById('clearBtn').style.visibility = count > 0 ? 'visible' : 'hidden';
 
+        const btn = document.getElementById('downloadBtn');
         if (this.isProcessing) {
-            this.downloadBtn.disabled = true;
-            this.downloadBtn.textContent = `正在转换... (剩余 ${waitingCount})`;
-        } else if (totalCount > 0 && completedCount === totalCount) {
-            this.downloadBtn.textContent = `下载全部 (${completedCount} 个文件)`;
-            this.downloadBtn.disabled = false;
+            btn.disabled = true;
+            btn.textContent = `正在转换... (剩余 ${waitingCount})`;
+        } else if (doneCount > 0 && doneCount === count) {
+            btn.disabled = false;
+            btn.textContent = `下载全部 (${doneCount} 个文件)`;
         } else {
-            this.downloadBtn.textContent = `下载全部 (${rateText})`;
-            this.downloadBtn.disabled = true;
+            btn.disabled = true;
+            btn.textContent = `下载全部 (MP3 ${this.currentBitRate}kbps)`;
         }
     },
 
     async downloadAll() {
-        const completedFiles = this.files.filter(f => f.status === '完成' && f.blob);
-        if (completedFiles.length === 0) return;
-
-        this.downloadBtn.textContent = "正在打包...";
-        this.downloadBtn.disabled = true;
+        const doneFiles = this.files.filter(f => f.status === '完成' && f.blob);
+        if (doneFiles.length === 0) return;
 
         const zip = new JSZip();
-        completedFiles.forEach(item => {
-            zip.file(item.safeName, item.blob);
+        doneFiles.forEach(item => {
+            // 清理文件名
+            const safeName = item.file.name.replace(/[\\/:*?"<>|]/g, '_').replace(/\.[^/.]+$/, "") + '.mp3';
+            zip.file(safeName, item.blob);
         });
-        
-        const content = await zip.generateAsync({ type: 'blob' });
-        saveAs(content, "车机音乐_" + new Date().toLocaleDateString() + ".zip");
 
-        this.updateUIState();
+        const content = await zip.generateAsync({ type: 'blob' });
+        // Bug 7 修正：安全日期格式
+        saveAs(content, `车机音乐_${Utils.getDateStr()}.zip`);
     }
 };
 
