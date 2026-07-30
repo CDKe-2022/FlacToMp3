@@ -1309,52 +1309,87 @@ const App = {
         if (doneFiles.length === 0) return;
 
         const totalSize = doneFiles.reduce((sum, f) => sum + f.blob.size, 0);
-        const SIZE_WARN = 500 * 1024 * 1024; // 500MB 阈值
+        // 单个 ZIP 安全阈值：400MB，超出则自动分卷
+        const ZIP_MAX_SIZE = 400 * 1024 * 1024;
 
-        // 超大文件提示分批下载，避免浏览器内存不足
-        if (totalSize > SIZE_WARN) {
-            const proceed = confirm(
-                `打包总大小约 ${Utils.formatFileSize(totalSize)}，超过 500MB。\n` +
-                `浏览器可能因内存不足导致打包失败。\n\n` +
-                `点击「确定」继续打包，或点击「取消」改为逐个下载。`
-            );
-            if (!proceed) {
-                // 逐个下载
-                for (const item of doneFiles) {
-                    this.downloadSingle(item);
-                    await new Promise(r => setTimeout(r, 500)); // 间隔避免浏览器拦截
-                }
-                return;
-            }
-        }
-
-        this.showToast('正在打包 ZIP 文件...', 5000);
-        const zip = new JSZip();
+        // 生成安全文件名列表（处理重名）
         const usedNames = new Set();
-        doneFiles.forEach(item => {
+        const fileEntries = doneFiles.map(item => {
             const baseName = item.file.name.replace(/[\\/:*?"<>|]/g, '_').replace(/\.[^/.]+$/, "");
             let safeName = baseName + '.mp3';
-            // 处理重名文件，追加序号避免 ZIP 内覆盖
             let counter = 2;
             while (usedNames.has(safeName)) {
                 safeName = `${baseName} (${counter}).mp3`;
                 counter++;
             }
             usedNames.add(safeName);
-            zip.file(safeName, item.blob);
+            return { name: safeName, blob: item.blob };
         });
 
+        // 按大小分卷：贪心装入，每个分卷不超过 ZIP_MAX_SIZE
+        const batches = [];
+        let currentBatch = [];
+        let currentSize = 0;
+
+        for (const entry of fileEntries) {
+            if (currentSize + entry.blob.size > ZIP_MAX_SIZE && currentBatch.length > 0) {
+                batches.push(currentBatch);
+                currentBatch = [];
+                currentSize =  0;
+            }
+            currentBatch.push(entry);
+            currentSize += entry.blob.size;
+        }
+        if (currentBatch.length > 0) batches.push(currentBatch);
+
+        // 单个分卷直接下载，多分卷逐个打包下载
+        if (batches.length === 1) {
+            await this.packAndDownload(batches[0], `车机音乐_${Utils.getDateStr()}.zip`);
+        } else {
+            this.showToast(`总大小 ${Utils.formatFileSize(totalSize)}，将分 ${batches.length} 个压缩包下载`, 5000);
+            for (let i = 0; i < batches.length; i++) {
+                const zipName = `车机音乐_${Utils.getDateStr()}_part${i + 1}of${batches.length}.zip`;
+                this.showToast(`正在打包第 ${i + 1}/${batches.length} 个...`, 3000);
+                const ok = await this.packAndDownload(batches[i], zipName);
+                if (!ok) {
+                    this.showToast(`第 ${i + 1} 个打包失败，已跳过，请逐个下载该批次文件`);
+                }
+                // 间隔避免浏览器拦截连续下载
+                await new Promise(r => setTimeout(r, 800));
+            }
+            this.showToast(`全部完成！共 ${batches.length} 个压缩包`, 3000);
+        }
+    },
+
+    async packAndDownload(entries, zipName) {
+        const zip = new JSZip();
+        entries.forEach(entry => zip.file(entry.name, entry.blob));
         try {
             const content = await zip.generateAsync({ type: 'blob' });
-            saveAs(content, `车机音乐_${Utils.getDateStr()}.zip`);
+            saveAs(content, zipName);
+            return true;
         } catch (err) {
-            this.showToast('打包下载失败：' + err.message + '，请尝试逐个下载');
+            console.error('打包失败:', err);
+            return false;
         }
     },
 
     downloadSingle(item) {
+        if (!item.blob) { this.showToast('文件未就绪'); return; }
         const baseName = item.file.name.replace(/\.[^/.]+$/, "") + '.mp3';
-        saveAs(item.blob, baseName);
+        try {
+            saveAs(item.blob, baseName);
+        } catch (e) {
+            // saveAs 失败时使用原生 a 标签降级下载
+            const url = URL.createObjectURL(item.blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = baseName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
     }
 };
 
