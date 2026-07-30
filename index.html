@@ -651,9 +651,11 @@ class WorkerPool {
     }
 
     run(taskId, data, callback, onProgress) {
-        this.callbacks.set(taskId, { callback, onProgress });
         const freeWorker = this.pool.find(w => !w.busy);
         if (!freeWorker) return false;
+
+        // 确认有空闲 Worker 后再注册 callback，避免返回 false 时 callback 泄漏在 Map 中
+        this.callbacks.set(taskId, { callback, onProgress });
 
         freeWorker.busy = true;
         freeWorker.currentTaskId = taskId;
@@ -694,8 +696,8 @@ const App = {
     pool: null,
     audioContext: null,
     workerUrl: null,
-    activePipelines: 0,
-    MAX_PIPELINES: 2,
+    activeDecodes: 0,
+    MAX_DECODES: 3,
     isReady: false,
 
     init() {
@@ -803,26 +805,35 @@ const App = {
         });
 
         this.updateUI();
-        this.dispatchPipeline();
+        this.dispatchDecode();
     },
 
-    dispatchPipeline() {
+    dispatchDecode() {
         this.updateUI();
 
-        if (this.activePipelines >= this.MAX_PIPELINES) return;
+        // 解码并发槽位有限，防止同时占用过多主线程 AudioContext
+        if (this.activeDecodes >= this.MAX_DECODES) return;
 
         const task = this.files.find(f => f.status === '等待' && !f.cancelled);
         if (!task) return;
 
-        this.activePipelines++;
-        this.runPipeline(task);
+        this.activeDecodes++;
+        this.runDecodeAndEncode(task);
     },
 
-    async runPipeline(task) {
-        if (task.cancelled) { this.activePipelines--; this.dispatchPipeline(); return; }
+    async runDecodeAndEncode(task) {
+        if (task.cancelled) { this.activeDecodes--; this.dispatchDecode(); return; }
 
         task.status = '解码中';
         this.renderItem(task.id, task.file, '解码中');
+
+        let decodeSlotReleased = false;
+        const releaseDecodeSlot = () => {
+            if (decodeSlotReleased) return;
+            decodeSlotReleased = true;
+            this.activeDecodes--;
+            this.dispatchDecode();
+        };
 
         try {
             const buffer = await task.file.arrayBuffer();
@@ -834,6 +845,11 @@ const App = {
                 audioBuffer = await this.resample(audioBuffer, 44100);
             }
 
+            // 解码阶段完成，立即释放解码槽位，让下一个文件可以开始解码
+            task.status = '待编码';
+            releaseDecodeSlot();
+
+            // 进入编码阶段：如果没有空闲 Worker，在这里排队等待
             task.status = '编码中';
             this.renderItem(task.id, task.file, '编码中');
 
@@ -842,40 +858,45 @@ const App = {
                 right: audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : null
             };
 
-            const dispatched = this.pool.run(task.id, {
-                samples, sampleRate: 44100,
-                channels: audioBuffer.numberOfChannels > 1 ? 2 : 1,
-                bitRate: this.currentBitRate
-            }, (result) => {
-                if (task.cancelled) { this.activePipelines--; this.dispatchPipeline(); return; }
+            // 尝试将任务派发给 Worker；若无空闲 Worker 则轮询等待
+            const tryDispatch = () => {
+                const dispatched = this.pool.run(task.id, {
+                    samples, sampleRate: 44100,
+                    channels: audioBuffer.numberOfChannels > 1 ? 2 : 1,
+                    bitRate: this.currentBitRate
+                }, (result) => {
+                    if (task.cancelled) { this.dispatchDecode(); return; }
 
-                if (result.status === 'done') {
-                    task.status = '完成'; task.blob = result.blob;
-                } else {
-                    task.status = '错误'; task.error = result.error;
+                    if (result.status === 'done') {
+                        task.status = '完成'; task.blob = result.blob;
+                    } else {
+                        task.status = '错误'; task.error = result.error;
+                    }
+
+                    this.renderItem(task.id, task.file, task.status, task.error);
+                    this.dispatchDecode();
+                }, (progress) => {
+                    const percent = Math.round(progress * 100);
+                    if (task.status === '编码中') this.updateProgress(task.id, percent);
+                });
+
+                if (!dispatched) {
+                    // 没有空闲 Worker，100ms 后重试（不占用解码槽位）
+                    setTimeout(() => {
+                        if (task.cancelled) return;
+                        tryDispatch();
+                    }, 100);
                 }
+            };
+            tryDispatch();
 
-                this.renderItem(task.id, task.file, task.status, task.error);
-                this.activePipelines--;
-                this.dispatchPipeline();
-            }, (progress) => {
-                const percent = Math.round(progress * 100);
-                if (task.status === '编码中') this.updateProgress(task.id, percent);
-            });
-
-            if (!dispatched) {
-                task.status = '等待';
-                this.renderItem(task.id, task.file, '等待');
-                this.activePipelines--;
-                setTimeout(() => this.dispatchPipeline(), 100);
-            }
         } catch (err) {
             if (!task.cancelled) {
                 task.status = '错误'; task.error = err.message;
                 this.renderItem(task.id, task.file, '错误', err.error);
             }
-            this.activePipelines--;
-            this.dispatchPipeline();
+            // 使用 releaseDecodeSlot 避免成功路径已释放后再次递减
+            releaseDecodeSlot();
         }
     },
 
@@ -962,6 +983,11 @@ const App = {
                 progressWrap.classList.remove('active');
                 statusText.textContent = '正在解码...';
                 break;
+            case '待编码':
+                badge.textContent = '就绪'; badge.classList.add('status-active');
+                progressWrap.classList.remove('active');
+                statusText.textContent = '等待编码...';
+                break;
             case '编码中':
                 badge.textContent = '转换'; badge.classList.add('status-active');
                 progressWrap.classList.add('active');
@@ -988,7 +1014,7 @@ const App = {
     updateUI() {
         const count = this.files.length;
         const doneCount = this.files.filter(f => f.status === '完成').length;
-        const pending = this.files.filter(f => ['等待', '解码中', '编码中'].includes(f.status)).length;
+        const pending = this.files.filter(f => ['等待', '解码中', '待编码', '编码中'].includes(f.status)).length;
         const totalSize = this.files.reduce((sum, f) => sum + f.file.size, 0);
 
         document.getElementById('fileCount').textContent = count;
