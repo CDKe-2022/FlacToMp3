@@ -610,8 +610,8 @@ const ICON_ERR  = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" s
 const Utils = {
     formatFileSize(bytes) {
         if (bytes === 0) return '0 B';
-        const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
         return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
     },
     getDateStr() { return new Date().toISOString().slice(0, 10); },
@@ -620,20 +620,34 @@ const Utils = {
 
 class WorkerPool {
     constructor(scriptUrl, poolSize) {
+        this.scriptUrl = scriptUrl;
         this.pool = [];
         this.callbacks = new Map();
 
         for (let i = 0; i < poolSize; i++) {
-            const worker = new Worker(scriptUrl);
-            worker.onmessage = (e) => this.handleMessage(e.data);
-            worker.onerror = (e) => {
-                const id = worker.currentTaskId;
-                if (id && this.callbacks.has(id)) {
-                    this.handleMessage({ id: id, type: 'result', status: 'error', error: 'Worker crash' });
-                }
-            };
-            this.pool.push({ worker, busy: false, currentTaskId: null });
+            this.pool.push(this.createWorker());
         }
+    }
+
+    createWorker() {
+        const worker = new Worker(this.scriptUrl);
+        const entry = { worker, busy: false, currentTaskId: null };
+
+        worker.onmessage = (e) => this.handleMessage(e.data);
+        worker.onerror = (e) => {
+            const id = worker.currentTaskId;
+            if (id && this.callbacks.has(id)) {
+                this.handleMessage({ id: id, type: 'result', status: 'error', error: 'Worker 崩溃' });
+            }
+            // 崩溃的 Worker 已无法工作，必须终止并重建
+            worker.terminate();
+            const idx = this.pool.indexOf(entry);
+            if (idx !== -1) {
+                this.pool[idx] = this.createWorker();
+            }
+        };
+
+        return entry;
     }
 
     run(taskId, data, callback, onProgress) {
@@ -793,13 +807,12 @@ const App = {
     },
 
     dispatchPipeline() {
+        this.updateUI();
+
         if (this.activePipelines >= this.MAX_PIPELINES) return;
 
         const task = this.files.find(f => f.status === '等待' && !f.cancelled);
-        if (!task) {
-            this.updateUI();
-            return;
-        }
+        if (!task) return;
 
         this.activePipelines++;
         this.runPipeline(task);
@@ -932,7 +945,11 @@ const App = {
         const progressBar = el.querySelector('.progress-bar');
         const icon = el.querySelector('.file-icon');
 
+        // 重置所有状态，防止从「错误」等状态切换时残留
         badge.className = 'file-status-badge';
+        badge.onclick = null;
+        badge.style.cursor = '';
+        icon.className = 'file-icon';
         statusText.textContent = status;
 
         switch (status) {
@@ -1002,13 +1019,26 @@ const App = {
 
         this.showToast('正在打包 ZIP 文件...', 5000);
         const zip = new JSZip();
+        const usedNames = new Set();
         doneFiles.forEach(item => {
-            const safeName = item.file.name.replace(/[\\/:*?"<>|]/g, '_').replace(/\.[^/.]+$/, "") + '.mp3';
+            const baseName = item.file.name.replace(/[\\/:*?"<>|]/g, '_').replace(/\.[^/.]+$/, "");
+            let safeName = baseName + '.mp3';
+            // 处理重名文件，追加序号避免 ZIP 内覆盖
+            let counter = 2;
+            while (usedNames.has(safeName)) {
+                safeName = `${baseName} (${counter}).mp3`;
+                counter++;
+            }
+            usedNames.add(safeName);
             zip.file(safeName, item.blob);
         });
 
-        const content = await zip.generateAsync({ type: 'blob' });
-        saveAs(content, `车机音乐_${Utils.getDateStr()}.zip`);
+        try {
+            const content = await zip.generateAsync({ type: 'blob' });
+            saveAs(content, `车机音乐_${Utils.getDateStr()}.zip`);
+        } catch (err) {
+            this.showToast('打包下载失败：' + err.message);
+        }
     }
 };
 
