@@ -303,6 +303,16 @@ input[type="file"]{display:none;}
 .status-done{background:var(--success-bg);color:var(--success);}
 .status-error{background:var(--error-bg);color:var(--error);cursor:pointer;}
 
+.file-action-btn{
+  width:30px;height:30px;flex-shrink:0;border-radius:8px;
+  display:grid;place-items:center;cursor:pointer;transition:.2s;
+  background:transparent;color:var(--text-3);font-size:18px;line-height:1;
+  border:1px solid transparent;
+}
+.file-action-btn:hover{background:var(--error-bg);color:var(--error);border-color:var(--error);}
+.file-action-btn.is-download:hover{background:var(--success-bg);color:var(--success);border-color:var(--success);}
+.file-action-btn.hidden{display:none;}
+
 /* Action bar */
 .action-bar{padding:18px 24px;border-top:1px solid var(--border);background:var(--surface-2);}
 .btn-download{
@@ -406,6 +416,7 @@ input[type="file"]{display:none;}
   .action-bar{padding:14px 18px;}
   .file-item{padding:12px 14px;gap:10px;}
   .file-icon{width:38px;height:38px;}
+  .file-action-btn{width:28px;height:28px;}
 }
 
 
@@ -606,6 +617,8 @@ input[type="file"]{display:none;}
 const ICON_NOTE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
 const ICON_DONE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 const ICON_ERR  = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16.5" x2="12" y2="16.5"/></svg>';
+const ICON_CANCEL = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+const ICON_DOWNLOAD = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
 
 const Utils = {
     formatFileSize(bytes) {
@@ -623,6 +636,7 @@ class WorkerPool {
         this.scriptUrl = scriptUrl;
         this.pool = [];
         this.callbacks = new Map();
+        this.onWorkerFree = null; // Worker 空闲时的回调，用于事件驱动调度
 
         for (let i = 0; i < poolSize; i++) {
             this.pool.push(this.createWorker());
@@ -683,6 +697,8 @@ class WorkerPool {
             if (workerObj) {
                 workerObj.busy = false;
                 workerObj.currentTaskId = null;
+                // Worker 空闲，通知等待中的任务可以重试派发
+                if (this.onWorkerFree) this.onWorkerFree();
             }
         }
     }
@@ -702,9 +718,6 @@ const App = {
 
     init() {
         try {
-            const AudioContext = window.AudioContext || window.webkitAudioContext;
-            this.audioContext = new AudioContext();
-
             const workerTemplate = document.getElementById('worker-code').textContent;
             const fullWorker = atob(LAMEJS_B64) + '\n' + workerTemplate;
             const blob = new Blob([fullWorker], { type: 'application/javascript' });
@@ -713,6 +726,13 @@ const App = {
             const cpuCount = navigator.hardwareConcurrency || 4;
             this.pool = new WorkerPool(this.workerUrl, Math.min(cpuCount, 4));
 
+            // 解码并发数根据 CPU 核心数动态调整：解码是主线程操作，
+            // 核心数越多可适当提高并发，但上限 4 以避免主线程卡顿
+            this.MAX_DECODES = Math.min(cpuCount, 4);
+
+            // AudioContext 延迟到用户手势（选择文件/拖拽）时创建，兼容 iOS Safari
+            this.audioContext = null;
+
             this.isReady = true;
         } catch (e) {
             console.error("Initialization Error:", e);
@@ -720,6 +740,15 @@ const App = {
         }
 
         this.bindEvents();
+    },
+
+    // 延迟创建 AudioContext，在用户手势中调用，兼容 iOS Safari 的自动播放策略
+    ensureAudioContext() {
+        if (this.audioContext) return this.audioContext;
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) throw new Error('浏览器不支持 Web Audio API');
+        this.audioContext = new AudioContext();
+        return this.audioContext;
     },
 
     showToast(message, duration = 3000) {
@@ -787,6 +816,14 @@ const App = {
             return;
         }
 
+        // 在用户手势中创建 AudioContext，兼容 iOS Safari 的自动播放策略
+        try {
+            this.ensureAudioContext();
+        } catch (e) {
+            this.showToast("音频引擎初始化失败：" + e.message);
+            return;
+        }
+
         const allowed = ['flac', 'wav', 'mp3', 'm4a', 'ogg', 'ape'];
         const valid = Array.from(files).filter(f => allowed.includes(f.name.split('.').pop().toLowerCase()));
 
@@ -849,46 +886,20 @@ const App = {
             task.status = '待编码';
             releaseDecodeSlot();
 
-            // 进入编码阶段：如果没有空闲 Worker，在这里排队等待
+            // 进入编码阶段：尝试派发到 Worker，无空闲则入队等待（事件驱动，不轮询）
             task.status = '编码中';
             this.renderItem(task.id, task.file, '编码中');
 
+            const channels = audioBuffer.numberOfChannels > 1 ? 2 : 1;
             const samples = {
                 left: audioBuffer.getChannelData(0),
-                right: audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : null
+                right: channels > 1 ? audioBuffer.getChannelData(1) : null
             };
 
-            // 尝试将任务派发给 Worker；若无空闲 Worker 则轮询等待
-            const tryDispatch = () => {
-                const dispatched = this.pool.run(task.id, {
-                    samples, sampleRate: 44100,
-                    channels: audioBuffer.numberOfChannels > 1 ? 2 : 1,
-                    bitRate: this.currentBitRate
-                }, (result) => {
-                    if (task.cancelled) { this.dispatchDecode(); return; }
+            // 显式释放 audioBuffer 引用，让 GC 在编码期间回收解码后的音频数据
+            audioBuffer = null;
 
-                    if (result.status === 'done') {
-                        task.status = '完成'; task.blob = result.blob;
-                    } else {
-                        task.status = '错误'; task.error = result.error;
-                    }
-
-                    this.renderItem(task.id, task.file, task.status, task.error);
-                    this.dispatchDecode();
-                }, (progress) => {
-                    const percent = Math.round(progress * 100);
-                    if (task.status === '编码中') this.updateProgress(task.id, percent);
-                });
-
-                if (!dispatched) {
-                    // 没有空闲 Worker，100ms 后重试（不占用解码槽位）
-                    setTimeout(() => {
-                        if (task.cancelled) return;
-                        tryDispatch();
-                    }, 100);
-                }
-            };
-            tryDispatch();
+            this.enqueueEncode(task, samples, channels);
 
         } catch (err) {
             if (!task.cancelled) {
@@ -897,6 +908,74 @@ const App = {
             }
             // 使用 releaseDecodeSlot 避免成功路径已释放后再次递减
             releaseDecodeSlot();
+        }
+    },
+
+    // 编码任务队列：事件驱动，Worker 空闲时自动唤醒等待的任务
+    encodeQueue: [],
+
+    enqueueEncode(task, samples, channels) {
+        const encodeJob = { task, samples, channels };
+        this.encodeQueue.push(encodeJob);
+
+        const dispatchJob = (job) => {
+            const dispatched = this.pool.run(job.task.id, {
+                samples: job.samples, sampleRate: 44100,
+                channels: job.channels,
+                bitRate: this.currentBitRate
+            }, (result) => {
+                if (job.task.cancelled) { this.dispatchDecode(); return; }
+
+                if (result.status === 'done') {
+                    job.task.status = '完成'; job.task.blob = result.blob;
+                } else {
+                    job.task.status = '错误'; job.task.error = result.error;
+                }
+
+                this.renderItem(job.task.id, job.task.file, job.task.status, job.task.error);
+                // 编码完成后显式释放大对象引用，降低内存峰值
+                job.samples.left = null;
+                job.samples.right = null;
+                job.samples = null;
+                this.dispatchDecode();
+            }, (progress) => {
+                const percent = Math.round(progress * 100);
+                if (job.task.status === '编码中') this.updateProgress(job.task.id, percent);
+            });
+
+            if (dispatched) {
+                // 成功派发，从队列移除
+                const idx = this.encodeQueue.indexOf(job);
+                if (idx !== -1) this.encodeQueue.splice(idx, 1);
+            }
+        };
+
+        // 立即尝试派发（可能有空闲 Worker）
+        dispatchJob(encodeJob);
+
+        // 如果未成功派发（仍在队列中），注册一次性监听器，Worker 空闲时自动唤醒
+        if (this.encodeQueue.includes(encodeJob)) {
+            const prevHandler = this.pool.onWorkerFree;
+            const workerFreeHandler = () => {
+                // 先恢复之前的 handler（支持多个等待任务链式唤醒）
+                this.pool.onWorkerFree = prevHandler;
+                // 检查队列中所有待派发任务
+                const pending = [...this.encodeQueue];
+                for (const job of pending) {
+                    if (job.task.cancelled) {
+                        const idx = this.encodeQueue.indexOf(job);
+                        if (idx !== -1) this.encodeQueue.splice(idx, 1);
+                        continue;
+                    }
+                    dispatchJob(job);
+                    if (!this.encodeQueue.includes(job)) break; // 成功派发，退出循环
+                }
+                // 如果还有未派发的任务，重新注册监听
+                if (this.encodeQueue.length > 0 && !this.pool.onWorkerFree) {
+                    this.pool.onWorkerFree = workerFreeHandler;
+                }
+            };
+            this.pool.onWorkerFree = workerFreeHandler;
         }
     },
 
@@ -910,6 +989,7 @@ const App = {
     },
 
     async decodeAudio(buffer) {
+        if (!this.audioContext) this.ensureAudioContext();
         if (this.audioContext.state === 'suspended') await this.audioContext.resume();
         return await this.audioContext.decodeAudioData(buffer);
     },
@@ -928,12 +1008,63 @@ const App = {
     clearList() {
         this.files.forEach(f => f.cancelled = true);
         this.files = [];
+        this.encodeQueue = [];
         document.getElementById('fileList').innerHTML = `
             <div class="empty-state">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14h3l3-9 4 18 3-9h4"/><circle cx="12" cy="12" r="9"/></svg>
                 <p>还没有添加文件</p>
                 <span>将音频文件拖入左侧区域，或点击选择文件</span>
             </div>`;
+        this.updateUI();
+    },
+
+    cancelTask(id) {
+        const task = this.files.find(f => f.id === id);
+        if (!task) return;
+
+        task.cancelled = true;
+
+        // 如果任务在编码队列中等待，直接移除
+        const queueIdx = this.encodeQueue.findIndex(job => job.task.id === id);
+        if (queueIdx !== -1) {
+            const job = this.encodeQueue[queueIdx];
+            if (job.samples) { job.samples.left = null; job.samples.right = null; }
+            this.encodeQueue.splice(queueIdx, 1);
+        }
+
+        // 更新 UI 为已取消状态
+        task.status = '已取消';
+        const el = document.querySelector(`[data-id="${id}"]`);
+        if (el) {
+            el.style.opacity = '0.45';
+            const badge = el.querySelector('.file-status-badge');
+            const statusText = el.querySelector('.status-text');
+            const actionBtn = el.querySelector('.file-action-btn');
+            const progressWrap = el.querySelector('.progress-wrapper');
+            if (badge) { badge.textContent = '已取消'; badge.className = 'file-status-badge status-waiting'; }
+            if (statusText) statusText.textContent = '已取消';
+            if (progressWrap) progressWrap.classList.remove('active');
+            if (actionBtn) {
+                actionBtn.innerHTML = ICON_CANCEL;
+                actionBtn.title = '移除';
+                actionBtn.className = 'file-action-btn';
+                actionBtn.onclick = () => this.removeFile(id);
+            }
+        }
+
+        this.showToast(`已取消：${task.file.name}`);
+        this.dispatchDecode();
+    },
+
+    removeFile(id) {
+        const el = document.querySelector(`[data-id="${id}"]`);
+        if (el) {
+            el.style.transition = 'opacity .25s, transform .25s';
+            el.style.opacity = '0';
+            el.style.transform = 'translateX(20px)';
+            setTimeout(() => el.remove(), 250);
+        }
+        this.files = this.files.filter(f => f.id !== id);
         this.updateUI();
     },
 
@@ -955,6 +1086,7 @@ const App = {
                     </div>
                     <div class="progress-wrapper"><div class="progress-bar"></div></div>
                 </div>
+                <div class="file-action-btn" title="取消"></div>
                 <div class="file-status-badge">...</div>
             `;
             document.getElementById('fileList').appendChild(el);
@@ -965,6 +1097,7 @@ const App = {
         const progressWrap = el.querySelector('.progress-wrapper');
         const progressBar = el.querySelector('.progress-bar');
         const icon = el.querySelector('.file-icon');
+        const actionBtn = el.querySelector('.file-action-btn');
 
         // 重置所有状态，防止从「错误」等状态切换时残留
         badge.className = 'file-status-badge';
@@ -972,26 +1105,41 @@ const App = {
         badge.style.cursor = '';
         icon.className = 'file-icon';
         statusText.textContent = status;
+        actionBtn.className = 'file-action-btn';
+        actionBtn.onclick = null;
+        actionBtn.innerHTML = '';
 
         switch (status) {
             case '等待':
                 badge.textContent = '排队'; badge.classList.add('status-waiting');
                 progressWrap.classList.remove('active');
+                actionBtn.innerHTML = ICON_CANCEL;
+                actionBtn.title = '取消';
+                actionBtn.onclick = () => this.cancelTask(id);
                 break;
             case '解码中':
                 badge.textContent = '解码'; badge.classList.add('status-active');
                 progressWrap.classList.remove('active');
                 statusText.textContent = '正在解码...';
+                actionBtn.innerHTML = ICON_CANCEL;
+                actionBtn.title = '取消';
+                actionBtn.onclick = () => this.cancelTask(id);
                 break;
             case '待编码':
                 badge.textContent = '就绪'; badge.classList.add('status-active');
                 progressWrap.classList.remove('active');
                 statusText.textContent = '等待编码...';
+                actionBtn.innerHTML = ICON_CANCEL;
+                actionBtn.title = '取消';
+                actionBtn.onclick = () => this.cancelTask(id);
                 break;
             case '编码中':
                 badge.textContent = '转换'; badge.classList.add('status-active');
                 progressWrap.classList.add('active');
                 progressBar.style.width = '0%';
+                actionBtn.innerHTML = ICON_CANCEL;
+                actionBtn.title = '取消';
+                actionBtn.onclick = () => this.cancelTask(id);
                 break;
             case '完成':
                 badge.textContent = '完成'; badge.classList.add('status-done');
@@ -999,6 +1147,13 @@ const App = {
                 statusText.textContent = '转换完成';
                 icon.className = 'file-icon is-done'; icon.innerHTML = ICON_DONE;
                 el.querySelector('.file-name').textContent = file.name.replace(/\.[^/.]+$/, "") + '.mp3';
+                actionBtn.classList.add('is-download');
+                actionBtn.innerHTML = ICON_DOWNLOAD;
+                actionBtn.title = '下载';
+                actionBtn.onclick = () => {
+                    const task = this.files.find(f => f.id === id);
+                    if (task) this.downloadSingle(task);
+                };
                 break;
             case '错误':
                 badge.textContent = '失败'; badge.classList.add('status-error');
@@ -1007,6 +1162,9 @@ const App = {
                 badge.style.cursor = 'pointer';
                 badge.onclick = () => this.showToast(error || '未知错误');
                 icon.className = 'file-icon is-error'; icon.innerHTML = ICON_ERR;
+                actionBtn.innerHTML = ICON_CANCEL;
+                actionBtn.title = '移除';
+                actionBtn.onclick = () => this.removeFile(id);
                 break;
         }
     },
@@ -1043,6 +1201,26 @@ const App = {
         const doneFiles = this.files.filter(f => f.status === '完成' && f.blob);
         if (doneFiles.length === 0) return;
 
+        const totalSize = doneFiles.reduce((sum, f) => sum + f.blob.size, 0);
+        const SIZE_WARN = 500 * 1024 * 1024; // 500MB 阈值
+
+        // 超大文件提示分批下载，避免浏览器内存不足
+        if (totalSize > SIZE_WARN) {
+            const proceed = confirm(
+                `打包总大小约 ${Utils.formatFileSize(totalSize)}，超过 500MB。\n` +
+                `浏览器可能因内存不足导致打包失败。\n\n` +
+                `点击「确定」继续打包，或点击「取消」改为逐个下载。`
+            );
+            if (!proceed) {
+                // 逐个下载
+                for (const item of doneFiles) {
+                    this.downloadSingle(item);
+                    await new Promise(r => setTimeout(r, 500)); // 间隔避免浏览器拦截
+                }
+                return;
+            }
+        }
+
         this.showToast('正在打包 ZIP 文件...', 5000);
         const zip = new JSZip();
         const usedNames = new Set();
@@ -1063,8 +1241,13 @@ const App = {
             const content = await zip.generateAsync({ type: 'blob' });
             saveAs(content, `车机音乐_${Utils.getDateStr()}.zip`);
         } catch (err) {
-            this.showToast('打包下载失败：' + err.message);
+            this.showToast('打包下载失败：' + err.message + '，请尝试逐个下载');
         }
+    },
+
+    downloadSingle(item) {
+        const baseName = item.file.name.replace(/\.[^/.]+$/, "") + '.mp3';
+        saveAs(item.blob, baseName);
     }
 };
 
