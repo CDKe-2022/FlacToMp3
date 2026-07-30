@@ -735,6 +735,7 @@ const App = {
 
             this.pool = new WorkerPool(this.workerUrl, maxWorkers);
             this.MAX_DECODES = maxDecodes;
+            this.maxWorkers = maxWorkers;
 
             // AudioContext 延迟到用户手势（选择文件/拖拽）时创建，兼容 iOS Safari
             this.audioContext = null;
@@ -944,6 +945,13 @@ const App = {
         // 解码并发槽位有限，防止同时占用过多主线程 AudioContext
         if (this.activeDecodes >= this.MAX_DECODES) return;
 
+        // 背压机制：如果编码队列中等待的样本数已达上限，
+        // 说明编码已追不上解码，暂停新解码直到编码消化掉一部分
+        // 每个 samples 约 120MB，限制堆积数量防止内存溢出
+        // 解码是原生 C++ 实现，速度远快于 JS 编码，所以缓冲区不需要太大
+        // 允许 ceil(maxWorkers/2) 个缓冲：足够保持流水线不断流，又不会堆积太多
+        if (this.encodeQueue.length >= Math.max(1, Math.ceil(this.maxWorkers / 2))) return;
+
         const task = this.files.find(f => f.status === '等待' && !f.cancelled);
         if (!task) return;
 
@@ -975,11 +983,9 @@ const App = {
                 audioBuffer = await this.resample(audioBuffer, 44100);
             }
 
-            // 解码阶段完成，立即释放解码槽位，让下一个文件可以开始解码
-            task.status = '待编码';
-            releaseDecodeSlot();
-
-            // 进入编码阶段：尝试派发到 Worker，无空闲则入队等待（事件驱动，不轮询）
+            // 进入编码阶段：先入队再释放解码槽位
+            // 顺序很重要：先 enqueueEncode 把 samples 加入队列，
+            // 再 releaseDecodeSlot → dispatchDecode 才能看到正确的队列长度做背压判断
             task.status = '编码中';
             this.renderItem(task.id, task.file, '编码中');
 
@@ -992,7 +998,13 @@ const App = {
             // 显式释放 audioBuffer 引用，让 GC 在编码期间回收解码后的音频数据
             audioBuffer = null;
 
+            // 先将 samples 入编码队列（或立即派发到 Worker）
             this.enqueueEncode(task, samples, channels);
+
+            // 再释放解码槽位，此时 dispatchDecode 能看到正确的队列长度做背压判断
+            // 注意：状态保持 '编码中'，enqueueEncode 可能已立即派发到 Worker，
+            // Worker 的进度回调会检查 status === '编码中' 来更新 UI
+            releaseDecodeSlot();
 
         } catch (err) {
             if (!task.cancelled) {
@@ -1067,6 +1079,8 @@ const App = {
                 if (this.encodeQueue.length > 0 && !this.pool.onWorkerFree) {
                     this.pool.onWorkerFree = workerFreeHandler;
                 }
+                // 队列缩短后，尝试唤醒被背压阻塞的解码
+                this.dispatchDecode();
             };
             this.pool.onWorkerFree = workerFreeHandler;
         }
