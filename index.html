@@ -316,7 +316,7 @@ input[type="file"]{display:none;}
 /* Action bar */
 .action-bar{padding:18px 24px;border-top:1px solid var(--border);background:var(--surface-2);}
 .btn-download{
-  width:100%;padding:15px;border:none;border-radius:var(--radius-md);
+  flex:1;padding:15px;border:none;border-radius:var(--radius-md);
   font-size:15px;font-weight:700;color:#fff;font-family:inherit;
   background:var(--grad);cursor:pointer;
   box-shadow:0 14px 34px -10px rgba(67,56,202,0.55),var(--shadow-sm);
@@ -326,6 +326,16 @@ input[type="file"]{display:none;}
 .btn-download:not(:disabled):hover{transform:translateY(-1px);box-shadow:0 18px 38px -12px rgba(91,141,239,0.75);}
 .btn-download:not(:disabled):active{transform:scale(0.99);}
 .btn-download:disabled{background:#cbd5e1;cursor:not-allowed;box-shadow:none;}
+.btn-pause{
+  width:52px;padding:15px 0;border:none;border-radius:var(--radius-md);
+  font-size:13px;font-weight:700;color:var(--text-2);font-family:inherit;
+  background:var(--surface-3);cursor:pointer;border:1px solid var(--border);
+  transition:.2s;display:flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0;
+}
+.btn-pause:hover{background:#dde2eb;color:var(--text);}
+.btn-pause.is-paused{background:var(--grad-soft);color:var(--primary-ink);border-color:var(--primary-light);}
+.btn-pause.is-paused .icon-pause{display:none;}
+.btn-pause.is-paused .icon-resume{display:block !important;}
 .privacy-note{
   display:flex;align-items:center;justify-content:center;gap:7px;
   margin-top:14px;font-size:11.5px;color:var(--text-3);text-align:center;
@@ -518,6 +528,11 @@ input[type="file"]{display:none;}
         <button class="btn-download" id="downloadBtn" disabled>
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span id="downloadText">开始转换</span>
+        </button>
+        <button class="btn-pause" id="pauseBtn" style="display:none">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-pause"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="icon-resume" style="display:none"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <span id="pauseText">暂停</span>
         </button>
         <div class="privacy-note">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -720,6 +735,7 @@ const App = {
     activeDecodes: 0,
     MAX_DECODES: 3,
     isReady: false,
+    paused: false,
 
     init() {
         try {
@@ -884,6 +900,10 @@ const App = {
 
         document.getElementById('clearBtn').addEventListener('click', () => this.clearList());
         document.getElementById('downloadBtn').addEventListener('click', () => this.downloadAll());
+        document.getElementById('pauseBtn').addEventListener('click', () => {
+            if (this.paused) this.resumeAll();
+            else this.pauseAll();
+        });
 
         document.querySelectorAll('.rate-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
@@ -941,6 +961,9 @@ const App = {
 
     dispatchDecode() {
         this.updateUI();
+
+        // 暂停时不启动新解码，正在进行的解码会自然完成
+        if (this.paused) return;
 
         // 解码并发槽位有限，防止同时占用过多主线程 AudioContext
         if (this.activeDecodes >= this.MAX_DECODES) return;
@@ -1023,67 +1046,87 @@ const App = {
         const encodeJob = { task, samples, channels };
         this.encodeQueue.push(encodeJob);
 
-        const dispatchJob = (job) => {
-            const dispatched = this.pool.run(job.task.id, {
-                samples: job.samples, sampleRate: 44100,
-                channels: job.channels,
-                bitRate: this.currentBitRate
-            }, (result) => {
-                if (job.task.cancelled) { this.dispatchDecode(); return; }
-
-                if (result.status === 'done') {
-                    job.task.status = '完成'; job.task.blob = result.blob;
-                } else {
-                    job.task.status = '错误'; job.task.error = result.error;
-                }
-
-                this.renderItem(job.task.id, job.task.file, job.task.status, job.task.error);
-                // 编码完成后显式释放大对象引用，降低内存峰值
-                job.samples.left = null;
-                job.samples.right = null;
-                job.samples = null;
-                this.dispatchDecode();
-            }, (progress) => {
-                const percent = Math.round(progress * 100);
-                if (job.task.status === '编码中') this.updateProgress(job.task.id, percent);
-            });
-
-            if (dispatched) {
-                // 成功派发，从队列移除
-                const idx = this.encodeQueue.indexOf(job);
-                if (idx !== -1) this.encodeQueue.splice(idx, 1);
-            }
-        };
+        // 暂停时仅入队，不派发到 Worker，恢复时统一唤醒
+        if (this.paused) return;
 
         // 立即尝试派发（可能有空闲 Worker）
-        dispatchJob(encodeJob);
+        this.dispatchEncodeJob(encodeJob);
 
-        // 如果未成功派发（仍在队列中），注册一次性监听器，Worker 空闲时自动唤醒
+        // 如果未成功派发（仍在队列中），注册监听器，Worker 空闲时自动唤醒
         if (this.encodeQueue.includes(encodeJob)) {
-            const prevHandler = this.pool.onWorkerFree;
-            const workerFreeHandler = () => {
-                // 先恢复之前的 handler（支持多个等待任务链式唤醒）
-                this.pool.onWorkerFree = prevHandler;
-                // 检查队列中所有待派发任务
-                const pending = [...this.encodeQueue];
-                for (const job of pending) {
-                    if (job.task.cancelled) {
-                        const idx = this.encodeQueue.indexOf(job);
-                        if (idx !== -1) this.encodeQueue.splice(idx, 1);
-                        continue;
-                    }
-                    dispatchJob(job);
-                    if (!this.encodeQueue.includes(job)) break; // 成功派发，退出循环
-                }
-                // 如果还有未派发的任务，重新注册监听
-                if (this.encodeQueue.length > 0 && !this.pool.onWorkerFree) {
-                    this.pool.onWorkerFree = workerFreeHandler;
-                }
-                // 队列缩短后，尝试唤醒被背压阻塞的解码
-                this.dispatchDecode();
-            };
-            this.pool.onWorkerFree = workerFreeHandler;
+            this.registerWorkerFreeHandler();
         }
+    },
+
+    // 将单个编码任务派发到 Worker，成功则从队列移除
+    dispatchEncodeJob(job) {
+        const dispatched = this.pool.run(job.task.id, {
+            samples: job.samples, sampleRate: 44100,
+            channels: job.channels,
+            bitRate: this.currentBitRate
+        }, (result) => {
+            if (job.task.cancelled) { this.dispatchDecode(); return; }
+
+            if (result.status === 'done') {
+                job.task.status = '完成'; job.task.blob = result.blob;
+            } else {
+                job.task.status = '错误'; job.task.error = result.error;
+            }
+
+            this.renderItem(job.task.id, job.task.file, job.task.status, job.task.error);
+            // 编码完成后显式释放大对象引用，降低内存峰值
+            job.samples.left = null;
+            job.samples.right = null;
+            job.samples = null;
+            this.dispatchDecode();
+        }, (progress) => {
+            const percent = Math.round(progress * 100);
+            if (job.task.status === '编码中') this.updateProgress(job.task.id, percent);
+        });
+
+        if (dispatched) {
+            const idx = this.encodeQueue.indexOf(job);
+            if (idx !== -1) this.encodeQueue.splice(idx, 1);
+        }
+    },
+
+    // 尝试派发编码队列中的所有待处理任务
+    tryDispatchEncodeQueue() {
+        if (this.paused) return;
+        const pending = [...this.encodeQueue];
+        for (const job of pending) {
+            if (job.task.cancelled) {
+                const idx = this.encodeQueue.indexOf(job);
+                if (idx !== -1) this.encodeQueue.splice(idx, 1);
+                continue;
+            }
+            this.dispatchEncodeJob(job);
+            // 派发成功则继续尝试下一个（可能还有空闲Worker）；
+            // 派发失败（job仍在队列中=无空闲Worker）则退出循环
+            if (this.encodeQueue.includes(job)) break;
+        }
+    },
+
+    // 注册 Worker 空闲回调，自动派发队列中的编码任务
+    registerWorkerFreeHandler() {
+        const prevHandler = this.pool.onWorkerFree;
+        const workerFreeHandler = () => {
+            // 先恢复之前的 handler（支持多个等待任务链式唤醒）
+            this.pool.onWorkerFree = prevHandler;
+
+            // 暂停时不派发队列任务，仅触发 dispatchDecode（它自己会检查 paused）
+            if (!this.paused) {
+                this.tryDispatchEncodeQueue();
+            }
+
+            // 如果还有未派发的任务，重新注册监听
+            if (this.encodeQueue.length > 0 && !this.pool.onWorkerFree) {
+                this.pool.onWorkerFree = workerFreeHandler;
+            }
+            // 队列缩短后，尝试唤醒被背压阻塞的解码
+            this.dispatchDecode();
+        };
+        this.pool.onWorkerFree = workerFreeHandler;
     },
 
     updateProgress(id, percent) {
@@ -1116,6 +1159,8 @@ const App = {
         this.files.forEach(f => f.cancelled = true);
         this.files = [];
         this.encodeQueue = [];
+        this.paused = false;
+        this.updatePauseButton();
         document.getElementById('fileList').innerHTML = `
             <div class="empty-state">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14h3l3-9 4 18 3-9h4"/><circle cx="12" cy="12" r="9"/></svg>
@@ -1123,6 +1168,45 @@ const App = {
                 <span>将音频文件拖入左侧区域，或点击选择文件</span>
             </div>`;
         this.updateUI();
+    },
+
+    pauseAll() {
+        if (this.paused) return;
+        this.paused = true;
+        this.updatePauseButton();
+        this.showToast('已暂停，可下载已完成的文件', 3000);
+        this.updateUI();
+    },
+
+    resumeAll() {
+        if (!this.paused) return;
+        this.paused = false;
+        this.updatePauseButton();
+        this.showToast('已恢复转换', 2000);
+
+        // 恢复流水线：先派发编码队列中积压的任务，再启动新解码
+        // 编码队列可能因暂停积压了多个 samples，有空闲 Worker 就立即派发
+        if (this.encodeQueue.length > 0) {
+            this.tryDispatchEncodeQueue();
+            // 如果队列中还有未派发的（没有空闲 Worker），注册监听器等 Worker 空闲
+            if (this.encodeQueue.length > 0 && !this.pool.onWorkerFree) {
+                this.registerWorkerFreeHandler();
+            }
+        }
+        this.dispatchDecode();
+    },
+
+    updatePauseButton() {
+        const btn = document.getElementById('pauseBtn');
+        const txt = document.getElementById('pauseText');
+        if (!btn || !txt) return;
+        if (this.paused) {
+            btn.classList.add('is-paused');
+            txt.textContent = '继续';
+        } else {
+            btn.classList.remove('is-paused');
+            txt.textContent = '暂停';
+        }
     },
 
     cancelTask(id) {
@@ -1292,15 +1376,32 @@ const App = {
         const btn = document.getElementById('downloadBtn');
         const txt = document.getElementById('downloadText');
 
-        if (pending > 0) {
+        // 有已完成的文件时，无论是否暂停、是否仍在转换，都允许下载
+        if (doneCount > 0) {
+            btn.disabled = false;
+            if (this.paused) {
+                txt.textContent = `下载已完成 (${doneCount} 个)`;
+            } else if (pending > 0) {
+                txt.textContent = `下载已完成 (${doneCount} 个)`;
+            } else {
+                txt.textContent = `下载全部 (${doneCount} 个文件)`;
+            }
+        } else if (this.paused) {
+            btn.disabled = true;
+            txt.textContent = '已暂停 (无已完成文件)';
+        } else if (pending > 0) {
             btn.disabled = true;
             txt.textContent = `处理中... (剩余 ${pending})`;
-        } else if (doneCount > 0) {
-            btn.disabled = false;
-            txt.textContent = `下载全部 (${doneCount} 个文件)`;
         } else {
             btn.disabled = true;
             txt.textContent = '开始转换';
+        }
+
+        // 暂停按钮可见性：有文件且（有正在处理的任务 或 已暂停）时显示
+        const pauseBtn = document.getElementById('pauseBtn');
+        if (pauseBtn) {
+            const showPause = count > 0 && (pending > 0 || this.paused);
+            pauseBtn.style.display = showPause ? 'flex' : 'none';
         }
     },
 
